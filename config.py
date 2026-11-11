@@ -1,21 +1,26 @@
-"""Configuration for BAM.
+"""BAM configuration.
 
-Single source of truth for training and inference. Resolution order:
+One flat dataclass, one setting per line, so the whole configuration fits on a
+screen and can be edited without hunting through nested sections.
 
-    CLI overrides  >  environment  >  YAML file  >  dataclass defaults
+    Config.load()                       # defaults + config.yaml + environment
+    Config.load(overrides=["epochs=5"]) # plus CLI-style overrides
 
-Environment variables use a double underscore to separate sections:
+Resolution order: CLI override > environment > config.yaml > defaults.
 
-    BAM_INFER__DEVICE=cpu
-    BAM_DATA__CROP_SIZE=256
-    BAM_TRAIN__BATCH_SIZE=32
+Environment variables are the field name in upper case with a ``BAM_`` prefix:
 
-CLI overrides use dot paths:
+    BAM_BATCH_SIZE=16 BAM_TRAIN_DEVICE=cuda python run.py
 
-    python run.py --set infer.device=cpu --set server.port=8001
+CLI overrides use the field name directly:
 
-The resolved config is embedded in every checkpoint, so a model can always be
-reproduced from the weights alone.
+    python run.py --set port=8001
+
+Dataset layout expected on disk (see README step 2):
+
+    datasets/<name>/train/im/*.jpg   datasets/<name>/train/gt/*.png
+    datasets/<name>/val/im/*.jpg     datasets/<name>/val/gt/*.png
+    datasets/<name>/test/im/*.jpg    datasets/<name>/test/gt/*.png
 """
 
 from __future__ import annotations
@@ -23,45 +28,56 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, get_args, get_origin, get_type_hints
 
-try:  # PyYAML is a hard dependency of the app, but keep import errors readable
+try:
     import yaml
-except Exception:  # pragma: no cover
+except Exception:  # pragma: no cover - keep the import error readable
     yaml = None
 
 
 ENV_PREFIX = "BAM_"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
+# Normalisation constants shared by training and inference. Not configurable on
+# purpose: a mismatch here silently degrades every prediction.
+RGB_MEAN = (0.485, 0.456, 0.406, 0.0)
+RGB_STD = (0.229, 0.224, 0.225, 1.0)
 
-# --------------------------------------------------------------------------- #
-# Sections
-# --------------------------------------------------------------------------- #
-
-
-@dataclass
-class PathsCfg:
-    datasets: str = "./datasets"
-    model: str = "./model/bam_v1.pth"
-    runs: str = "./runs"
+SPLITS = ("train", "val", "test")
 
 
 @dataclass
-class StrokeCfg:
-    """Parameters of the synthetic user stroke. All lengths are canonical px."""
+class Config:
+    # ------------------------------------------------------------------ paths
+    datasets_dir: str = "./datasets"          # folder holding every dataset
+    dataset: str = "demo"                     # which dataset to train on
+    model_path: str = "./model/bam_v1.pth"
+    onnx_path: str = "./model/bam_v1.onnx"
+    onnx_int8_path: str = "./model/bam_v1_int8.onnx"
+    runs_dir: str = "./runs"
+    root: str = ""                            # "" = the folder containing this file
 
-    radius_min: float = 1.5
-    radius_max: float = 6.0
-    jitter_sigma: float = 3.0
-    wobble_amp: tuple = (1.0, 4.0)
-    wobble_len: tuple = (20.0, 180.0)
-    coverage: tuple = (0.45, 1.00)
-    simplify_eps: tuple = (2.0, 10.0)
-    smooth_window: tuple = (5, 21)
-    max_offset: float = 12.0
+    # ------------------------------------------------------------- resolution
+    short_side: int = 640                     # images are downscaled to this short side
+    crop_size: int = 256                      # training and inference crop
+    crop_stride: int = 128                    # spacing between crops along a stroke
+    target_sigma: float = 1.0                 # width of the soft boundary target
+    num_workers: int = 8                      # dataloader workers
+
+    # ------------------------------------------------------------ stroke synth
+    stroke_radius_min: float = 1.5            # brush radius range, canonical px
+    stroke_radius_max: float = 6.0
+    stroke_jitter: float = 2.0                # global offset sigma
+    stroke_wobble_amp: tuple = (0.5, 2.0)     # wobble amplitude range
+    stroke_wobble_len: tuple = (60.0, 260.0)  # wobble wavelength range
+    stroke_coverage: tuple = (0.45, 1.00)     # fraction of the contour stroked
+    stroke_simplify: tuple = (6.0, 16.0)      # RDP epsilon range
+    stroke_smooth: tuple = (15, 31)            # smoothing window range
+    stroke_max_offset: float = 12.0           # displacement clip, px
+    stroke_encoding: str = "binary"           # binary | sdf
     p_no_stroke: float = 0.08
     p_distractor: float = 0.15
     p_interior: float = 0.05
@@ -69,47 +85,25 @@ class StrokeCfg:
     p_two_arcs: float = 0.15
     p_dry_brush: float = 0.15
 
+    # ------------------------------------------------------------ crop mixture
+    mix_boundary: float = 0.50
+    mix_near: float = 0.20
+    mix_empty: float = 0.15
+    mix_dense: float = 0.15
 
-@dataclass
-class CropMixCfg:
-    boundary: float = 0.50
-    near: float = 0.20
-    empty: float = 0.15
-    dense: float = 0.15
+    # ------------------------------------------------------------------- model
+    width: int = 20                           # base channel width
+    depth: int = 4                            # encoder/decoder levels
+    max_width: int = 256                      # channel cap
+    block: str = "ds"                         # ds | vanilla
+    bilinear: bool = True                     # bilinear upsampling
 
-
-@dataclass
-class DataCfg:
-    tier: str = "A"
-    canonical_short_side: int = 640
-    crop_size: int = 256
-    stride: int = 128
-    stroke_source: str = "online"  # online | disk
-    stroke_encoding: str = "binary"  # binary | sdf
-    target_sigma: float = 1.0
-    num_workers: int = 8
-    rgb_mean: tuple = (0.485, 0.456, 0.406, 0.0)
-    rgb_std: tuple = (0.229, 0.224, 0.225, 1.0)
-    stroke: StrokeCfg = field(default_factory=StrokeCfg)
-    crop_mix: CropMixCfg = field(default_factory=CropMixCfg)
-
-
-@dataclass
-class ModelCfg:
-    in_channels: int = 4
-    out_channels: int = 1
-    width: int = 20
-    depth: int = 4
-    max_width: int = 256
-    block: str = "ds"  # ds | vanilla
-    bilinear: bool = True
-
-
-@dataclass
-class TrainCfg:
-    device: str = "auto"
+    # ---------------------------------------------------------------- training
+    seed: int = 1337
+    train_device: str = "auto"                # auto | cpu | cuda
     batch_size: int = 32
     crops_per_epoch: int = 24000
+    val_crops: int = 2000
     epochs: int = 60
     lr: float = 3e-4
     weight_decay: float = 1e-4
@@ -117,60 +111,40 @@ class TrainCfg:
     amp: bool = True
     ema_decay: float = 0.999
     grad_clip: float = 1.0
-    val_crops: int = 2000
-    early_stop_patience: int = 15
+    early_stop: int = 15
     pos_weight: float = 6.0
-    seed: int = 1337
 
-
-@dataclass
-class InferCfg:
-    device: str = "cpu"
-    backend: str = "auto"  # auto | onnx_int8 | onnx_fp32 | torch | mock
-    working_short_side: int = 640
-    crop_size: int = 256
-    stride: int = 128
+    # --------------------------------------------------------------- inference
+    infer_device: str = "cpu"                 # cpu | cuda
+    backend: str = "auto"                     # auto | onnx_int8 | onnx_fp32 | torch | mock
     max_crops: int = 64
-    batch_size: int = 16
+    infer_batch: int = 16
     threads: int = 8
     threshold: float = 0.5
     edge_threshold: float = 0.45
     sensitivity: float = 1.0
     expand: int = 0
     smooth: int = 2
-    mode: str = "object"
-    merge_weighting: str = "uniform"  # uniform | gaussian
+    mode: str = "object"                      # object | line
+    merge_weighting: str = "uniform"          # uniform | gaussian
     apply_dbscan: bool = False
     apply_morphology: bool = True
-    morph_kernel_size: int = 3
+    morph_kernel: int = 3
     morph_iterations: int = 2
     cache_entries: int = 2048
     allow_mock: bool = True
-    onnx_path: str = "./model/bam_v1.onnx"
-    onnx_int8_path: str = "./model/bam_v1_int8.onnx"
 
-
-@dataclass
-class ServerCfg:
+    # ------------------------------------------------------------------ server
     host: str = "127.0.0.1"
     port: int = 8000
-    max_content_mb: int = 24
+    max_upload_mb: int = 24
     debug: bool = False
     max_canvas_side: int = 2048
 
+    # -------------------------------------------------------------------- data
+    tier: str = "A"                           # A = shippable, B = research only
 
-@dataclass
-class Config:
-    root: str = ""
-    seed: int = 1337
-    paths: PathsCfg = field(default_factory=PathsCfg)
-    data: DataCfg = field(default_factory=DataCfg)
-    model: ModelCfg = field(default_factory=ModelCfg)
-    train: TrainCfg = field(default_factory=TrainCfg)
-    infer: InferCfg = field(default_factory=InferCfg)
-    server: ServerCfg = field(default_factory=ServerCfg)
-
-    # -- paths ------------------------------------------------------------- #
+    # ------------------------------------------------------------------- paths
 
     @property
     def project_root(self) -> Path:
@@ -183,18 +157,30 @@ class Config:
         return p if p.is_absolute() else (self.project_root / p).resolve()
 
     @property
-    def dataset_root(self) -> Path:
-        return self.path(self.paths.datasets)
+    def datasets_root(self) -> Path:
+        return self.path(self.datasets_dir)
 
     @property
-    def model_path(self) -> Path:
-        return self.path(self.paths.model)
+    def dataset_path(self) -> Path:
+        return self.datasets_root / self.dataset
+
+    @property
+    def model_file(self) -> Path:
+        return self.path(self.model_path)
+
+    @property
+    def onnx_file(self) -> Path:
+        return self.path(self.onnx_path)
+
+    @property
+    def onnx_int8_file(self) -> Path:
+        return self.path(self.onnx_int8_path)
 
     @property
     def runs_root(self) -> Path:
-        return self.path(self.paths.runs)
+        return self.path(self.runs_dir)
 
-    # -- serialisation ----------------------------------------------------- #
+    # ------------------------------------------------------------ serialisation
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -211,7 +197,7 @@ class Config:
         blob = json.dumps(self.to_dict(), sort_keys=True, default=str).encode()
         return hashlib.sha256(blob).hexdigest()[:12]
 
-    # -- loading ----------------------------------------------------------- #
+    # ------------------------------------------------------------------ loading
 
     @classmethod
     def load(
@@ -220,7 +206,6 @@ class Config:
         overrides: list[str] | None = None,
         use_env: bool = True,
     ) -> "Config":
-        """Load defaults, then YAML, then env, then ``key=value`` overrides."""
         data: dict[str, Any] = {}
 
         cfg_path = Path(path) if path else DEFAULT_CONFIG_PATH
@@ -230,71 +215,76 @@ class Config:
             loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
             if not isinstance(loaded, dict):
                 raise ValueError(f"{cfg_path} must contain a mapping at the top level")
-            _deep_update(data, loaded)
+            data.update(loaded)
 
         if use_env:
-            _deep_update(data, _env_overrides())
+            data.update(_env_overrides())
 
         for item in overrides or []:
-            _apply_override(data, item)
+            key, value = _parse_override(item)
+            data[key] = value
 
         return cls.from_dict(data)
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "Config":
-        return _from_dict(cls, data or {})
+        hints = get_type_hints(cls)
+        kwargs: dict[str, Any] = {}
+        for f in fields(cls):
+            if f.name in (data or {}):
+                kwargs[f.name] = _coerce(data[f.name], hints[f.name])
+        return cls(**kwargs)
 
-    # -- validation -------------------------------------------------------- #
+    # --------------------------------------------------------------- validation
 
     def validate(self) -> None:
-        d, m, t, i, s = self.data, self.model, self.train, self.infer, self.server
+        if not self.dataset:
+            raise ValueError("dataset must name a folder under datasets_dir")
+        if self.tier not in ("A", "B"):
+            raise ValueError("tier must be 'A' or 'B'")
 
-        if d.tier not in ("A", "B"):
-            raise ValueError("data.tier must be 'A' or 'B'")
-        if d.crop_size % 32 != 0:
-            raise ValueError("data.crop_size must be a multiple of 32")
-        if not 0 < d.stride <= d.crop_size:
-            raise ValueError("data.stride must be in (0, data.crop_size]")
-        if d.canonical_short_side < 256:
-            raise ValueError("data.canonical_short_side must be >= 256")
-        if d.stroke_source not in ("online", "disk"):
-            raise ValueError("data.stroke_source must be 'online' or 'disk'")
-        if d.stroke_encoding not in ("binary", "sdf"):
-            raise ValueError("data.stroke_encoding must be 'binary' or 'sdf'")
-        if len(d.rgb_mean) != 4 or len(d.rgb_std) != 4:
-            raise ValueError("data.rgb_mean / data.rgb_std must have 4 entries")
+        if self.short_side < 256:
+            raise ValueError("short_side must be >= 256")
+        if self.crop_size % 32 != 0:
+            raise ValueError("crop_size must be a multiple of 32")
+        if not 0 < self.crop_stride <= self.crop_size:
+            raise ValueError("crop_stride must be in (0, crop_size]")
+        if self.stroke_encoding not in ("binary", "sdf"):
+            raise ValueError("stroke_encoding must be 'binary' or 'sdf'")
+        if self.stroke_radius_min <= 0 or self.stroke_radius_max < self.stroke_radius_min:
+            raise ValueError("stroke radius range is invalid")
 
-        if m.in_channels != 4:
-            raise ValueError("model.in_channels must be 4 (RGB + stroke)")
-        if m.depth < 1:
-            raise ValueError("model.depth must be >= 1")
-        if m.block not in ("ds", "vanilla"):
-            raise ValueError("model.block must be 'ds' or 'vanilla'")
-        if m.width < 4:
-            raise ValueError("model.width must be >= 4")
+        mix_total = self.mix_boundary + self.mix_near + self.mix_empty + self.mix_dense
+        if abs(mix_total - 1.0) > 1e-6:
+            raise ValueError(f"crop mixture must sum to 1.0, got {mix_total}")
 
-        if t.device not in ("auto", "cpu", "cuda"):
-            raise ValueError("train.device must be auto, cpu or cuda")
-        if t.batch_size < 1:
-            raise ValueError("train.batch_size must be >= 1")
+        if self.width < 4:
+            raise ValueError("width must be >= 4")
+        if self.depth < 1:
+            raise ValueError("depth must be >= 1")
+        if self.block not in ("ds", "vanilla"):
+            raise ValueError("block must be 'ds' or 'vanilla'")
 
-        if i.device not in ("auto", "cpu", "cuda"):
-            raise ValueError("infer.device must be auto, cpu or cuda")
-        if i.backend not in ("auto", "onnx_int8", "onnx_fp32", "torch", "mock"):
-            raise ValueError("infer.backend is invalid")
-        if i.mode not in ("object", "line"):
-            raise ValueError("infer.mode must be 'object' or 'line'")
-        if i.merge_weighting not in ("uniform", "gaussian"):
-            raise ValueError("infer.merge_weighting must be 'uniform' or 'gaussian'")
-        if not 1 <= i.max_crops <= 256:
-            raise ValueError("infer.max_crops must be in [1, 256]")
-        if i.crop_size % 32 != 0:
-            raise ValueError("infer.crop_size must be a multiple of 32")
+        if self.train_device not in ("auto", "cpu", "cuda"):
+            raise ValueError("train_device must be auto, cpu or cuda")
+        if self.infer_device not in ("auto", "cpu", "cuda"):
+            raise ValueError("infer_device must be auto, cpu or cuda")
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
 
-        if not 1 <= s.port <= 65535:
-            raise ValueError("server.port must be in [1, 65535]")
-        if s.max_content_mb < 1:
-            raise ValueError("server.max_content_mb must be >= 1")
+        if self.backend not in ("auto", "onnx_int8", "onnx_fp32", "torch", "mock"):
+            raise ValueError("backend is invalid")
+        if self.mode not in ("object", "line"):
+            raise ValueError("mode must be 'object' or 'line'")
+        if self.merge_weighting not in ("uniform", "gaussian"):
+            raise ValueError("merge_weighting must be 'uniform' or 'gaussian'")
+        if not 1 <= self.max_crops <= 256:
+            raise ValueError("max_crops must be in [1, 256]")
+
+        if not 1 <= self.port <= 65535:
+            raise ValueError("port must be in [1, 65535]")
+        if self.max_upload_mb < 1:
+            raise ValueError("max_upload_mb must be >= 1")
 
 
 # --------------------------------------------------------------------------- #
@@ -302,31 +292,7 @@ class Config:
 # --------------------------------------------------------------------------- #
 
 
-def _deep_update(base: dict, extra: dict) -> dict:
-    for key, value in extra.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _deep_update(base[key], value)
-        else:
-            base[key] = value
-    return base
-
-
-def _leaf_paths(cls, prefix: tuple[str, ...] = ()) -> dict[str, Any]:
-    """Map dotted leaf paths to their dataclass field types."""
-    hints = get_type_hints(cls)
-    out: dict[str, Any] = {}
-    for f in fields(cls):
-        hint = hints[f.name]
-        if is_dataclass(hint):
-            out.update(_leaf_paths(hint, prefix + (f.name,)))
-        else:
-            out[".".join(prefix + (f.name,))] = hint
-    return out
-
-
 def _coerce(value: Any, hint: Any) -> Any:
-    if is_dataclass(hint):
-        return _from_dict(hint, value)
     origin = get_origin(hint)
     if origin in (tuple, list) or hint in (tuple, list):
         args = get_args(hint)
@@ -347,15 +313,6 @@ def _coerce(value: Any, hint: Any) -> Any:
     return value
 
 
-def _from_dict(cls, data: dict) -> Any:
-    hints = get_type_hints(cls)
-    kwargs: dict[str, Any] = {}
-    for f in fields(cls):
-        if f.name in data:
-            kwargs[f.name] = _coerce(data[f.name], hints[f.name])
-    return cls(**kwargs)
-
-
 def _parse_scalar(text: str) -> Any:
     if yaml is not None:
         try:
@@ -366,34 +323,25 @@ def _parse_scalar(text: str) -> Any:
 
 
 def _env_overrides() -> dict:
-    out: dict = {}
+    valid = {f.name for f in fields(Config)}
+    out: dict[str, Any] = {}
     for key, raw in os.environ.items():
         if not key.startswith(ENV_PREFIX):
             continue
-        path = key[len(ENV_PREFIX) :].lower()
-        parts = [p for p in path.split("__") if p]
-        if not parts:
-            continue
-        node = out
-        for part in parts[:-1]:
-            node = node.setdefault(part, {})
-        node[parts[-1]] = _parse_scalar(raw)
+        name = key[len(ENV_PREFIX) :].lower()
+        if name in valid:
+            out[name] = _parse_scalar(raw)
     return out
 
 
-def _apply_override(data: dict, item: str) -> None:
+def _parse_override(item: str) -> tuple[str, Any]:
     if "=" not in item:
         raise ValueError(f"override must look like key=value, got {item!r}")
     key, raw = item.split("=", 1)
-    parts = [p for p in key.strip().split(".") if p]
-    if not parts:
-        raise ValueError(f"empty override key in {item!r}")
-    node = data
-    for part in parts[:-1]:
-        node = node.setdefault(part, {})
-        if not isinstance(node, dict):
-            raise ValueError(f"override path {key!r} collides with a scalar")
-    node[parts[-1]] = _parse_scalar(raw)
+    key = key.strip()
+    if key not in {f.name for f in fields(Config)}:
+        raise ValueError(f"unknown config field: {key!r}")
+    return key, _parse_scalar(raw)
 
 
 def add_config_args(parser) -> None:
@@ -405,5 +353,5 @@ def add_config_args(parser) -> None:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="override a config value, e.g. --set infer.device=cpu",
+        help="override a config value, e.g. --set batch_size=16",
     )

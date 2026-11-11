@@ -1,13 +1,11 @@
 """Request parsing and validation.
 
 Hand-rolled instead of pydantic: the payload is small, the error messages need to
-be actionable in the UI, and adding a dependency for six fields is not worth it.
-Every numeric field is clamped to a safe range rather than trusted.
+be actionable in the UI, and every numeric field is clamped rather than trusted.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,7 +14,9 @@ import numpy as np
 
 from .services.storage import StorageError, decode_data_url, decode_mask_bytes
 
-SAFE_NAME = re.compile(r"^[A-Za-z0-9._\- ]{1,128}$")
+FORBIDDEN_CHARS = set("/\\\x00")
+MAX_NAME = 200
+VALID_SPLITS = {"train", "val", "test"}
 
 
 class ValidationError(ValueError):
@@ -33,6 +33,7 @@ class CropSpec:
 @dataclass
 class SegmentRequest:
     dataset: str
+    split: str
     image: str
     canvas_width: int
     canvas_height: int
@@ -69,41 +70,52 @@ def _clamp(value: Any, low: float, high: float, default: float) -> float:
 
 
 def safe_name(value: str, field_name: str) -> str:
-    if not isinstance(value, str) or not SAFE_NAME.match(value):
+    """Reject path traversal without rejecting legal filename characters.
+
+    An allowlist would break real datasets: DIS5K filenames contain ``#``, and
+    ``#`` also starts a URL fragment, so it must survive to the route.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValidationError(f"invalid {field_name}")
+    if len(value) > MAX_NAME:
+        raise ValidationError(f"{field_name} is too long")
+    if any(ch in FORBIDDEN_CHARS for ch in value):
         raise ValidationError(f"invalid {field_name}")
     if ".." in value or value.startswith("."):
         raise ValidationError(f"invalid {field_name}")
     return value
 
 
+def safe_split(value: Any) -> str:
+    split = str(value or "train").strip().lower()
+    if split not in VALID_SPLITS:
+        raise ValidationError(f"invalid split: {value!r}")
+    return split
+
+
 def parse_params(raw: dict | None, cfg) -> dict[str, Any]:
     raw = raw or {}
-    infer = cfg.infer
-    mode = str(raw.get("mode", infer.mode))
+    mode = str(raw.get("mode", cfg.mode))
     if mode not in ("object", "line"):
         mode = "object"
-    weighting = str(raw.get("merge_weighting", infer.merge_weighting))
+    weighting = str(raw.get("merge_weighting", cfg.merge_weighting))
     if weighting not in ("uniform", "gaussian"):
         weighting = "uniform"
 
     return {
-        "sensitivity": _clamp(raw.get("sensitivity", infer.sensitivity), 1.0, 3.0, 1.0),
-        "threshold": _clamp(raw.get("threshold", infer.threshold), 0.05, 0.95, 0.5),
-        "edge_threshold": _clamp(
-            raw.get("edge_threshold", infer.edge_threshold), 0.05, 0.95, 0.45
-        ),
-        "expand": int(_clamp(raw.get("expand", infer.expand), -16, 16, 0)),
-        "smooth": int(_clamp(raw.get("smooth", infer.smooth), 0, 4, 2)),
+        "sensitivity": _clamp(raw.get("sensitivity", cfg.sensitivity), 1.0, 3.0, 1.0),
+        "threshold": _clamp(raw.get("threshold", cfg.threshold), 0.05, 0.95, 0.5),
+        "edge_threshold": _clamp(raw.get("edge_threshold", cfg.edge_threshold), 0.05, 0.95, 0.45),
+        "expand": int(_clamp(raw.get("expand", cfg.expand), -16, 16, 0)),
+        "smooth": int(_clamp(raw.get("smooth", cfg.smooth), 0, 4, 2)),
         "mode": mode,
         "merge_weighting": weighting,
-        "apply_morphology": bool(raw.get("apply_morphology", infer.apply_morphology)),
-        "morph_kernel_size": int(
-            _clamp(raw.get("morph_kernel_size", infer.morph_kernel_size), 1, 15, 3)
-        ),
+        "apply_morphology": bool(raw.get("apply_morphology", cfg.apply_morphology)),
+        "morph_kernel_size": int(_clamp(raw.get("morph_kernel_size", cfg.morph_kernel), 1, 15, 3)),
         "morph_iterations": int(
-            _clamp(raw.get("morph_iterations", infer.morph_iterations), 1, 8, 2)
+            _clamp(raw.get("morph_iterations", cfg.morph_iterations), 1, 8, 2)
         ),
-        "apply_dbscan": bool(raw.get("apply_dbscan", infer.apply_dbscan)),
+        "apply_dbscan": bool(raw.get("apply_dbscan", cfg.apply_dbscan)),
     }
 
 
@@ -112,31 +124,30 @@ def parse_segment(payload: dict, cfg) -> SegmentRequest:
         raise ValidationError("body must be a JSON object")
 
     dataset = safe_name(_require(payload, "dataset", str), "dataset")
+    split = safe_split(payload.get("split"))
     image = safe_name(_require(payload, "image", str), "image")
 
     canvas = payload.get("canvas") or {}
     if not isinstance(canvas, dict):
         raise ValidationError("canvas must be an object")
-    width = int(_clamp(canvas.get("width", 0), 1, cfg.server.max_canvas_side, 0))
-    height = int(_clamp(canvas.get("height", 0), 1, cfg.server.max_canvas_side, 0))
+    width = int(_clamp(canvas.get("width", 0), 1, cfg.max_canvas_side, 0))
+    height = int(_clamp(canvas.get("height", 0), 1, cfg.max_canvas_side, 0))
     if width <= 0 or height <= 0:
         raise ValidationError("canvas dimensions are required")
 
     raw_crops = payload.get("crops")
     if not isinstance(raw_crops, list) or not raw_crops:
         raise ValidationError("crops must be a non-empty list")
-    if len(raw_crops) > cfg.infer.max_crops:
-        raise ValidationError(f"too many crops (max {cfg.infer.max_crops})")
+    if len(raw_crops) > cfg.max_crops:
+        raise ValidationError(f"too many crops (max {cfg.max_crops})")
 
     crops: list[CropSpec] = []
     for item in raw_crops:
         if not isinstance(item, dict):
             raise ValidationError("each crop must be an object")
-        size = int(_clamp(item.get("size", cfg.infer.crop_size), 32, 512, cfg.infer.crop_size))
-        if size != cfg.infer.crop_size:
-            raise ValidationError(
-                f"crop size must be {cfg.infer.crop_size}, got {size}"
-            )
+        size = int(_clamp(item.get("size", cfg.crop_size), 32, 512, cfg.crop_size))
+        if size != cfg.crop_size:
+            raise ValidationError(f"crop size must be {cfg.crop_size}, got {size}")
         crops.append(
             CropSpec(
                 x0=int(_clamp(item.get("x0", 0), -4096, 4096, 0)),
@@ -158,6 +169,7 @@ def parse_segment(payload: dict, cfg) -> SegmentRequest:
 
     return SegmentRequest(
         dataset=dataset,
+        split=split,
         image=image,
         canvas_width=width,
         canvas_height=height,
@@ -175,8 +187,8 @@ def parse_legacy_crops(payload: dict, cfg) -> tuple[list[LegacyCrop], dict, int,
     raw_crops = payload.get("crops")
     if not isinstance(raw_crops, list) or not raw_crops:
         raise ValidationError("crops must be a non-empty list")
-    if len(raw_crops) > cfg.infer.max_crops:
-        raise ValidationError(f"too many crops (max {cfg.infer.max_crops})")
+    if len(raw_crops) > cfg.max_crops:
+        raise ValidationError(f"too many crops (max {cfg.max_crops})")
 
     crops: list[LegacyCrop] = []
     for item in raw_crops:
@@ -216,13 +228,13 @@ def parse_legacy_crops(payload: dict, cfg) -> tuple[list[LegacyCrop], dict, int,
 
     params = parse_params(
         {
-            "sensitivity": payload.get("sensitivity", cfg.infer.sensitivity),
-            "threshold": payload.get("threshold", cfg.infer.threshold),
+            "sensitivity": payload.get("sensitivity", cfg.sensitivity),
+            "threshold": payload.get("threshold", cfg.threshold),
             "apply_morphology": payload.get("apply_morphology", True),
             "morph_kernel_size": payload.get("morph_kernel_size", 3),
             "morph_iterations": payload.get("morph_iterations", 2),
             "apply_dbscan": payload.get("apply_dbscan", False),
-            "mode": payload.get("mode", cfg.infer.mode),
+            "mode": payload.get("mode", cfg.mode),
         },
         cfg,
     )
@@ -233,8 +245,7 @@ def pseudo_stroke(rgb: np.ndarray) -> np.ndarray:
     """Weak stroke estimate from image gradients.
 
     Only used by the legacy endpoint when the caller does not send a stroke
-    channel. It is a degraded mode: the response sets ``degraded=true`` so the
-    caller knows the model was not given the real pen path.
+    channel. Degraded mode: the response sets ``degraded=true``.
     """
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
@@ -258,4 +269,5 @@ __all__ = [
     "parse_params",
     "pseudo_stroke",
     "safe_name",
+    "safe_split",
 ]

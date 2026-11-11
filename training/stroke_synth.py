@@ -42,16 +42,36 @@ class StrokeParams:
     p_two_arcs: float = 0.15
     p_dry_brush: float = 0.15
 
+    # Config field -> StrokeParams field. Kept explicit so the flat config can
+    # use readable names (stroke_radius_min) without renaming the dataclass.
+    _CONFIG_MAP = {
+        "stroke_radius_min": "radius_min",
+        "stroke_radius_max": "radius_max",
+        "stroke_jitter": "jitter_sigma",
+        "stroke_wobble_amp": "wobble_amp",
+        "stroke_wobble_len": "wobble_len",
+        "stroke_coverage": "coverage",
+        "stroke_simplify": "simplify_eps",
+        "stroke_smooth": "smooth_window",
+        "stroke_max_offset": "max_offset",
+        "p_no_stroke": "p_no_stroke",
+        "p_distractor": "p_distractor",
+        "p_interior": "p_interior",
+        "p_partial": "p_partial",
+        "p_two_arcs": "p_two_arcs",
+        "p_dry_brush": "p_dry_brush",
+    }
+
     @classmethod
     def from_config(cls, cfg) -> "StrokeParams":
-        """Build from a Config, a DataCfg, or a StrokeCfg-like object."""
+        """Build from a Config (flat fields) or any object with those names."""
         if cfg is None:
             return cls()
-        node = getattr(cfg, "stroke", cfg)
-        kwargs = {}
-        for f in cls.__dataclass_fields__:
-            if hasattr(node, f):
-                kwargs[f] = getattr(node, f)
+        kwargs = {
+            target: getattr(cfg, source)
+            for source, target in cls._CONFIG_MAP.items()
+            if hasattr(cfg, source)
+        }
         return cls(**kwargs)
 
 

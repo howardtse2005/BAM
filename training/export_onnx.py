@@ -96,14 +96,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = Config.load(args.config, args.overrides)
-    ckpt_path = Path(args.checkpoint) if args.checkpoint else cfg.model_path
+    ckpt_path = Path(args.checkpoint) if args.checkpoint else cfg.model_file
     if not ckpt_path.is_file():
         raise SystemExit(f"checkpoint not found: {ckpt_path}")
 
     model, ckpt = build_from_checkpoint(ckpt_path, torch.device("cpu"))
     model.eval()
 
-    out_path = Path(args.out) if args.out else Path(cfg.infer.onnx_path)
+    out_path = Path(args.out) if args.out else cfg.onnx_file
     if not out_path.is_absolute():
         out_path = cfg.path(str(out_path))
 
@@ -119,9 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     if args.int8:
-        int8_path = Path(cfg.infer.onnx_int8_path)
-        if not int8_path.is_absolute():
-            int8_path = cfg.path(str(int8_path))
+        int8_path = cfg.onnx_int8_file
         report["int8"] = quantize_int8(out_path, int8_path)
         if int8_path.is_file():
             report["int8_parity"] = parity_check(model, int8_path, args.size)

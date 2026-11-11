@@ -1,8 +1,32 @@
 {
   "dataset": "demo",
-  "accepted": 24,
-  "rejected": 0,
-  "tier": "A",
+  "source": "datasets\\_raw\\demo",
   "short_side": 640,
-  "rejections": []
+  "splits": {
+    "train": {
+      "split": "train",
+      "images": 19,
+      "processed": 19,
+      "resized": 0,
+      "edges_written": 19,
+      "rejected": 0
+    },
+    "val": {
+      "split": "val",
+      "images": 2,
+      "processed": 2,
+      "resized": 0,
+      "edges_written": 2,
+      "rejected": 0
+    },
+    "test": {
+      "split": "test",
+      "images": 3,
+      "processed": 3,
+      "resized": 0,
+      "edges_written": 3,
+      "rejected": 0
+    }
+  },
+  "created_at": "2026-11-11T09:46:52.573689+00:00"
 }

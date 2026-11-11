@@ -1,23 +1,31 @@
 """Dataset download and import helpers.
 
-Only COCO is automated, because it is the only large instance-segmentation
-corpus with a stable, documented URL layout and a licence that permits
-commercial use of the annotations.
+Only COCO is automated, because it is the only large instance-segmentation corpus
+with a stable, documented URL layout and a licence that permits commercial use of
+the annotations.
 
 Everything else (Open Images, DIS5K, DUTS, ...) is imported from a folder you
-have downloaded yourself. That is deliberate: several of those datasets have no
-commercial licence, and a one-command downloader would make it too easy to
-contaminate a shippable checkpoint.
+have downloaded yourself, laid out as::
+
+    <dataset>/train/im  <dataset>/train/gt
+    <dataset>/val/im    <dataset>/val/gt
+    <dataset>/test/im   <dataset>/test/gt
+
+That is deliberate: several of those datasets have no commercial licence, and a
+one-command downloader would make it too easy to contaminate a shippable
+checkpoint.
 
     python -m training.prepare.download --check
-    python -m training.prepare.download --coco --coco-split val2017
-    python -m training.prepare.download --coco --coco-split train2017 --limit 20000
+    python -m training.prepare.download --coco --limit 5000
+
+COCO images are copied byte-for-byte; only the instance masks are rendered.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import urllib.request
 import zipfile
@@ -99,7 +107,7 @@ def unzip(archive: Path, dest: Path) -> None:
 
 
 def _polygon_mask(segmentation, height: int, width: int) -> np.ndarray | None:
-    """Render COCO polygon segmentation. RLE (crowd) is skipped."""
+    """Render a COCO polygon segmentation. RLE (crowd) is skipped."""
     if isinstance(segmentation, dict):
         return None
     mask = np.zeros((height, width), np.uint8)
@@ -113,25 +121,11 @@ def _polygon_mask(segmentation, height: int, width: int) -> np.ndarray | None:
     return mask if drew else None
 
 
-def convert_coco(
-    coco_root: Path,
-    split: str,
-    out_dir: Path,
-    limit: int | None = None,
-    overwrite: bool = False,
-) -> dict:
-    ann_path = coco_root / "annotations" / f"instances_{split}.json"
-    image_dir = coco_root / split
-    if not ann_path.is_file():
-        raise FileNotFoundError(f"missing annotations: {ann_path}")
-    if not image_dir.is_dir():
-        raise FileNotFoundError(f"missing images: {image_dir}")
-
-    print(f"  reading {ann_path.name}")
+def _best_instances(ann_path: Path) -> tuple[dict, dict]:
+    """Largest non-crowd polygon instance per image."""
     data = json.loads(ann_path.read_text(encoding="utf-8"))
     images = {img["id"]: img for img in data["images"]}
 
-    # Keep the largest non-crowd instance per image.
     best: dict[int, dict] = {}
     for ann in data["annotations"]:
         if ann.get("iscrowd", 0):
@@ -143,57 +137,103 @@ def convert_coco(
         current = best.get(ann["image_id"])
         if current is None or ann["area"] > current["area"]:
             best[ann["image_id"]] = ann
+    return images, best
 
-    mask_dir = out_dir / "masks"
-    mask_dir.mkdir(parents=True, exist_ok=True)
 
-    pairs: list[list[str]] = []
-    written = 0
-    skipped = 0
-    for image_id, ann in sorted(best.items()):
-        if limit is not None and written >= limit:
-            break
-        meta = images.get(image_id)
-        if meta is None:
-            continue
-        image_path = image_dir / meta["file_name"]
-        if not image_path.is_file():
-            skipped += 1
-            continue
+def convert_coco_split(
+    coco_root: Path,
+    source_split: str,
+    out_dir: Path,
+    limit: int | None = None,
+    val_fraction: float = 0.5,
+) -> dict:
+    """Convert one COCO split into ``im/`` and ``gt/`` folders.
 
-        mask_path = mask_dir / f"{image_id:012d}.png"
-        if not mask_path.is_file() or overwrite:
-            mask = _polygon_mask(ann["segmentation"], meta["height"], meta["width"])
-            if mask is None:
+    ``val2017`` is divided into ``val`` and ``test`` so the dataset ends up with
+    all three splits. ``train2017`` becomes ``train``.
+    """
+    ann_path = coco_root / "annotations" / f"instances_{source_split}.json"
+    image_dir = coco_root / source_split
+    if not ann_path.is_file():
+        raise FileNotFoundError(f"missing annotations: {ann_path}")
+    if not image_dir.is_dir():
+        raise FileNotFoundError(f"missing images: {image_dir}")
+
+    print(f"  reading {ann_path.name}")
+    images, best = _best_instances(ann_path)
+    image_ids = sorted(best)
+
+    if source_split == "val2017":
+        cut = int(round(len(image_ids) * val_fraction))
+        targets = {"val": image_ids[:cut], "test": image_ids[cut:]}
+    else:
+        targets = {"train": image_ids}
+
+    stats: dict[str, dict] = {}
+    for split, ids in targets.items():
+        if limit is not None:
+            ids = ids[:limit]
+        im_dir = out_dir / split / "im"
+        gt_dir = out_dir / split / "gt"
+        im_dir.mkdir(parents=True, exist_ok=True)
+        gt_dir.mkdir(parents=True, exist_ok=True)
+
+        written = 0
+        skipped = 0
+        for image_id in ids:
+            meta = images.get(image_id)
+            ann = best.get(image_id)
+            if meta is None or ann is None:
                 skipped += 1
                 continue
-            imwrite(mask_path, mask)
+            source = image_dir / meta["file_name"]
+            if not source.is_file():
+                skipped += 1
+                continue
 
-        pairs.append([str(image_path.resolve()), str(mask_path.resolve())])
-        written += 1
-        if written % 1000 == 0:
-            print(f"    {written} instances")
+            mask_path = gt_dir / f"{image_id:012d}.png"
+            if not mask_path.is_file():
+                mask = _polygon_mask(ann["segmentation"], meta["height"], meta["width"])
+                if mask is None:
+                    skipped += 1
+                    continue
+                imwrite(mask_path, mask)
 
-    (out_dir / "pairs.json").write_text(json.dumps(pairs, indent=0), encoding="utf-8")
-    stats = {"split": split, "instances": written, "skipped": skipped, "out": str(out_dir)}
-    (out_dir / "stats.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
-    return stats
+            target = im_dir / f"{image_id:012d}{source.suffix.lower()}"
+            if not target.is_file():
+                shutil.copy2(source, target)
+
+            written += 1
+            if written % 1000 == 0:
+                print(f"    {split}: {written}")
+
+        stats[split] = {"images": written, "skipped": skipped}
+
+    return {"source": source_split, "splits": stats, "out": str(out_dir)}
 
 
 def prepare_coco(
-    coco_root: Path, split: str, out_dir: Path, limit: int | None, download_images: bool
+    coco_root: Path,
+    out_dir: Path,
+    limit: int | None,
+    download_images: bool,
 ) -> dict:
     if download_images:
-        archive = coco_root / f"{split}.zip"
-        download(COCO_URLS[split], archive)
-        unzip(archive, coco_root)
+        for split in ("train2017", "val2017"):
+            archive = coco_root / f"{split}.zip"
+            download(COCO_URLS[split], archive)
+            unzip(archive, coco_root)
 
     ann_archive = coco_root / "annotations_trainval2017.zip"
-    if not (coco_root / "annotations" / f"instances_{split}.json").is_file():
+    if not (coco_root / "annotations" / "instances_val2017.json").is_file():
         download(COCO_URLS["annotations"], ann_archive)
         unzip(ann_archive, coco_root)
 
-    return convert_coco(coco_root, split, out_dir, limit=limit)
+    results = [
+        convert_coco_split(coco_root, split, out_dir, limit=limit)
+        for split in ("train2017", "val2017")
+    ]
+    return {"converted": results, "out": str(out_dir)}
 
 
 # --------------------------------------------------------------------------- #
@@ -206,9 +246,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="print the licence matrix")
     parser.add_argument("--coco", action="store_true", help="prepare COCO instances")
     parser.add_argument("--coco-root", default="datasets/_raw/coco")
-    parser.add_argument("--coco-split", default="val2017", choices=["train2017", "val2017"])
-    parser.add_argument("--out", default=None)
-    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--out", default="datasets/_raw/coco")
+    parser.add_argument("--limit", type=int, default=None, help="max images per split")
     parser.add_argument(
         "--no-download",
         action="store_true",
@@ -221,20 +260,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.coco:
             return 0
 
-    coco_root = Path(args.coco_root)
-    out_dir = Path(args.out) if args.out else Path("datasets/_raw") / f"coco_{args.coco_split}"
     stats = prepare_coco(
-        coco_root,
-        args.coco_split,
-        out_dir,
+        Path(args.coco_root),
+        Path(args.out),
         limit=args.limit,
         download_images=not args.no_download,
     )
     print(json.dumps(stats, indent=2))
-    print(
-        f"\nnext:\n  python -m training.prepare.normalize --name coco "
-        f"--source {out_dir} --tier A"
-    )
+    print(f"\nnext:\n  python -m training.prepare.preprocess --dataset {args.out}")
     return 0
 
 

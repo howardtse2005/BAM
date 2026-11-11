@@ -1,9 +1,9 @@
-"""Evaluate a checkpoint on a manifest split.
+"""Evaluate a checkpoint on a dataset split.
 
-    python -m training.evaluate --split test_a --checkpoint model/bam_v1.pth
-    python -m training.evaluate --split test_b --checkpoint runs/.../best.pth --limit 500
+    python -m training.evaluate --split test --checkpoint model/bam_v1.pth
+    python -m training.evaluate --split val  --checkpoint runs/.../best.pth --limit 200
 
-Writes a JSON report next to the run directory and prints a Markdown table.
+Writes a JSON report and prints a Markdown table.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -45,28 +44,27 @@ def build_from_checkpoint(path: str | Path, device: torch.device) -> tuple[BAMUN
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Evaluate BAM on a split")
+    parser = argparse.ArgumentParser(description="Evaluate BAM on a dataset split")
     add_config_args(parser)
-    parser.add_argument("--split", default="test_a")
+    parser.add_argument("--split", default="test", choices=["train", "val", "test"])
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--limit", type=int, default=None, help="max images to evaluate")
-    parser.add_argument("--manifest", default=None)
     parser.add_argument("--out", default=None)
     args = parser.parse_args(argv)
 
     cfg = Config.load(args.config, args.overrides)
     cfg.validate()
-    device = resolve_device(cfg.infer.device if cfg.infer.device != "auto" else "cpu")
-    ckpt_path = Path(args.checkpoint) if args.checkpoint else cfg.model_path
+    device = resolve_device(cfg.infer_device)
+    ckpt_path = Path(args.checkpoint) if args.checkpoint else cfg.model_file
+    if not ckpt_path.is_file():
+        raise SystemExit(f"checkpoint not found: {ckpt_path}")
     model, ckpt = build_from_checkpoint(ckpt_path, device)
 
-    dataset = build_dataset(cfg, args.split, train=False, manifest=args.manifest)
-    if args.limit:
-        dataset.length = min(args.limit, len(dataset.samples))
-
+    dataset = build_dataset(cfg, args.split, train=False, length=args.limit)
     loader = DataLoader(dataset, batch_size=4, shuffle=False, num_workers=0)
+
     acc = MetricAccumulator()
-    per_size: dict[str, MetricAccumulator] = {}
+    per_area: dict[str, MetricAccumulator] = {}
 
     with torch.inference_mode():
         for batch in loader:
@@ -75,24 +73,25 @@ def main(argv: list[str] | None = None) -> int:
             probs = torch.sigmoid(logits).float().cpu().numpy()
             gts = batch["gt"].cpu().numpy()
             for i in range(probs.shape[0]):
-                pred = (probs[i, 0] > 0.5).astype(np.uint8) * 255
-                gt = (gts[i, 0] > 0.5).astype(np.uint8) * 255
+                pred = (probs[i, 0] > 0.5).astype("uint8") * 255
+                gt = (gts[i, 0] > 0.5).astype("uint8") * 255
                 metrics = evaluate_masks(pred, gt)
                 acc.add(metrics)
 
                 area = float((gt > 0).mean())
-                bucket = "<32" if area < 0.01 else "32-96" if area < 0.1 else ">96"
-                per_size.setdefault(bucket, MetricAccumulator()).add(metrics)
+                bucket = "<1%" if area < 0.01 else "1-10%" if area < 0.10 else ">10%"
+                per_area.setdefault(bucket, MetricAccumulator()).add(metrics)
 
     summary = {
+        "dataset": cfg.dataset,
         "split": args.split,
         "checkpoint": str(ckpt_path),
         "checkpoint_epoch": ckpt.get("epoch"),
         "data_tier": ckpt.get("data_tier"),
-        "manifest_hash": ckpt.get("manifest_hash"),
+        "dataset_hash": ckpt.get("dataset_hash"),
         "images": len(acc),
         "metrics": acc.mean(),
-        "by_area_ratio": {k: v.mean() for k, v in per_size.items()},
+        "by_foreground_area": {k: v.mean() for k, v in per_area.items()},
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -100,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    print(f"\n{args.split}: {len(acc)} images")
+    print(f"\n{cfg.dataset} / {args.split}: {len(acc)} images")
     print("| metric | value |")
     print("| --- | --- |")
     for key, value in summary["metrics"].items():

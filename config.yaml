@@ -1,103 +1,96 @@
-# BAM runtime and training configuration.
-# Every value here can be overridden by an environment variable or a CLI flag:
-#   BAM_INFER__DEVICE=cuda python run.py
-#   python run.py --set infer.device=cuda
-#
-# Resolution order: CLI > env > this file > dataclass defaults in config.py
+# BAM configuration. One setting per line.
+# Override without editing this file:
+#   BAM_BATCH_SIZE=16 python run.py
+#   python run.py --set port=8001
 
+# ---------------------------------------------------------------------- paths
+datasets_dir: ./datasets          # folder holding every dataset
+dataset: demo                     # which dataset to train on
+model_path: ./model/bam_v1.pth
+onnx_path: ./model/bam_v1.onnx
+onnx_int8_path: ./model/bam_v1_int8.onnx
+runs_dir: ./runs
+
+# ----------------------------------------------------------------- resolution
+short_side: 640                   # images are downscaled to this short side
+crop_size: 256                    # training and inference crop
+crop_stride: 128                  # spacing between crops along a stroke
+target_sigma: 1.0                 # width of the soft boundary target
+num_workers: 8                    # dataloader workers
+
+# ---------------------------------------------------------------- stroke synth
+stroke_radius_min: 1.5            # brush radius range, canonical px
+stroke_radius_max: 6.0
+stroke_jitter: 3.0                # global offset sigma
+stroke_wobble_amp: [1.0, 4.0]
+stroke_wobble_len: [20.0, 180.0]
+stroke_coverage: [0.45, 1.00]     # fraction of the contour stroked
+stroke_simplify: [2.0, 10.0]      # RDP epsilon range
+stroke_smooth: [5, 21]
+stroke_max_offset: 12.0
+stroke_encoding: binary           # binary | sdf
+p_no_stroke: 0.08
+p_distractor: 0.15
+p_interior: 0.05
+p_partial: 0.15
+p_two_arcs: 0.15
+p_dry_brush: 0.15
+
+# ---------------------------------------------------------------- crop mixture
+mix_boundary: 0.50
+mix_near: 0.20
+mix_empty: 0.15
+mix_dense: 0.15
+
+# ----------------------------------------------------------------------- model
+width: 20                         # base channel width (16 / 20 / 24 / 32)
+depth: 4                          # encoder/decoder levels
+max_width: 256
+block: ds                         # ds | vanilla
+bilinear: true
+
+# -------------------------------------------------------------------- training
 seed: 1337
+train_device: auto                # auto | cpu | cuda
+batch_size: 32
+crops_per_epoch: 24000
+val_crops: 2000
+epochs: 60
+lr: 0.0003
+weight_decay: 0.0001
+warmup_epochs: 3
+amp: true
+ema_decay: 0.999
+grad_clip: 1.0
+early_stop: 15
+pos_weight: 6.0
 
-paths:
-  datasets: ./datasets
-  model: ./model/bam_v1.pth
-  runs: ./runs
+# ------------------------------------------------------------------- inference
+infer_device: cpu                 # cpu | cuda
+backend: auto                     # auto | onnx_int8 | onnx_fp32 | torch | mock
+max_crops: 64
+infer_batch: 16
+threads: 8
+threshold: 0.5
+edge_threshold: 0.45
+sensitivity: 1.0
+expand: 0
+smooth: 2
+mode: object                      # object | line
+merge_weighting: uniform          # uniform | gaussian
+apply_dbscan: false
+apply_morphology: true
+morph_kernel: 3
+morph_iterations: 2
+cache_entries: 2048
+allow_mock: true
 
-data:
-  tier: "A"                    # A = commercially shippable, B = research only
-  canonical_short_side: 640
-  crop_size: 256
-  stride: 128
-  stroke_source: online        # online | disk
-  stroke_encoding: binary      # binary | sdf
-  target_sigma: 1.0
-  num_workers: 8
-  rgb_mean: [0.485, 0.456, 0.406, 0.0]
-  rgb_std: [0.229, 0.224, 0.225, 1.0]
-  stroke:
-    radius_min: 1.5
-    radius_max: 6.0
-    jitter_sigma: 3.0
-    wobble_amp: [1.0, 4.0]
-    wobble_len: [20.0, 180.0]
-    coverage: [0.45, 1.00]
-    simplify_eps: [2.0, 10.0]
-    smooth_window: [5, 21]
-    max_offset: 12.0
-    p_no_stroke: 0.08
-    p_distractor: 0.15
-    p_interior: 0.05
-    p_partial: 0.15
-    p_two_arcs: 0.15
-    p_dry_brush: 0.15
-  crop_mix:
-    boundary: 0.50
-    near: 0.20
-    empty: 0.15
-    dense: 0.15
+# ---------------------------------------------------------------------- server
+host: "127.0.0.1"
+port: 8000
+max_upload_mb: 24
+debug: false
+max_canvas_side: 2048
 
-model:
-  in_channels: 4
-  out_channels: 1
-  width: 20
-  depth: 4
-  max_width: 256
-  block: ds                    # ds | vanilla
-  bilinear: true
-
-train:
-  device: auto                 # auto | cpu | cuda
-  batch_size: 32
-  crops_per_epoch: 24000
-  epochs: 60
-  lr: 0.0003
-  weight_decay: 0.0001
-  warmup_epochs: 3
-  amp: true
-  ema_decay: 0.999
-  grad_clip: 1.0
-  val_crops: 2000
-  early_stop_patience: 15
-  pos_weight: 6.0
-  seed: 1337
-
-infer:
-  device: cpu                  # cpu | cuda
-  backend: auto                # auto | onnx_int8 | onnx_fp32 | torch | mock
-  working_short_side: 640
-  crop_size: 256
-  stride: 128
-  max_crops: 64
-  batch_size: 16
-  threads: 8
-  threshold: 0.5
-  edge_threshold: 0.45
-  sensitivity: 1.0
-  expand: 0
-  smooth: 2
-  mode: object                 # object | line
-  merge_weighting: uniform     # uniform | gaussian
-  apply_dbscan: false
-  apply_morphology: true
-  morph_kernel_size: 3
-  morph_iterations: 2
-  cache_entries: 2048
-  allow_mock: true
-  onnx_path: ./model/bam_v1.onnx
-  onnx_int8_path: ./model/bam_v1_int8.onnx
-
-server:
-  host: "127.0.0.1"
-  port: 8000
-  max_content_mb: 24
-  debug: false
-  max_canvas_side: 2048
+# ------------------------------------------------------------------------ data
+tier: A                           # A = shippable, B = research only

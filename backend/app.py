@@ -35,16 +35,16 @@ def create_app(config=None, config_path=None, overrides=None) -> Flask:
         static_url_path="/static",
     )
     app.config["BAM"] = cfg
-    app.config["MAX_CONTENT_LENGTH"] = int(cfg.server.max_content_mb) * 1024 * 1024
+    app.config["MAX_CONTENT_LENGTH"] = int(cfg.max_upload_mb) * 1024 * 1024
     app.config["JSON_SORT_KEYS"] = False
     app.json.sort_keys = False
 
     logging.basicConfig(
-        level=logging.DEBUG if cfg.server.debug else logging.INFO,
+        level=logging.DEBUG if cfg.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    app.extensions["bam_index"] = DatasetIndex(cfg.dataset_root)
+    app.extensions["bam_index"] = DatasetIndex(cfg.datasets_root)
     app.extensions["bam_registry"] = ModelRegistry(cfg)
 
     from .routes import datasets as datasets_routes
@@ -65,7 +65,7 @@ def create_app(config=None, config_path=None, overrides=None) -> Flask:
             jsonify(
                 {
                     "status": "error",
-                    "message": f"payload exceeds {cfg.server.max_content_mb} MB",
+                    "message": f"payload exceeds {cfg.max_upload_mb} MB",
                 }
             ),
             413,

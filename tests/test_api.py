@@ -18,10 +18,10 @@ def _decode(data_url: str) -> np.ndarray:
     return cv2.imdecode(np.frombuffer(base64.b64decode(payload), np.uint8), cv2.IMREAD_GRAYSCALE)
 
 
-def _segment_payload(app, dataset="toy", name=None, extra_params=None):
+def _segment_payload(app, dataset="toy", split="train", name=None, extra_params=None):
     index = app.extensions["bam_index"]
-    name = name or index.list_images(dataset)[0]
-    gt = index.load_mask(dataset, name)
+    name = name or index.list_images(dataset, split)[0]
+    gt = index.load_mask(dataset, split, name)
     height, width = gt.shape
 
     stroke = np.zeros_like(gt)
@@ -39,15 +39,15 @@ def _segment_payload(app, dataset="toy", name=None, extra_params=None):
 
     params = {"mode": "object", "smooth": 2, "expand": 0}
     params.update(extra_params or {})
-    payload = {
+    return {
         "dataset": dataset,
+        "split": split,
         "image": name,
         "canvas": {"width": width, "height": height},
         "crops": boxes[:64],
         "stroke_mask": _encode(stroke),
         "params": params,
-    }
-    return payload, gt
+    }, gt
 
 
 def test_health(client):
@@ -57,25 +57,32 @@ def test_health(client):
     assert data["model"]["is_mock"] is True
 
 
-def test_list_datasets(client):
+def test_list_datasets_reports_splits(client):
     data = client.get("/api/datasets").get_json()
-    names = [item["name"] for item in data["datasets"]]
-    assert "toy" in names
     entry = next(item for item in data["datasets"] if item["name"] == "toy")
     assert entry["count"] == 6
-    assert entry["thumb"].endswith(".jpg")
+    assert entry["splits"] == {"train": 4, "val": 1, "test": 1}
+    assert entry["thumb"].startswith("/media/toy/train/im/")
 
 
-def test_list_images(client):
-    data = client.get("/api/datasets/toy/images").get_json()
-    assert data["total"] == 6
-    assert len(data["images"]) == 6
+def test_list_images_per_split(client):
+    train = client.get("/api/datasets/toy/images?split=train").get_json()
+    test = client.get("/api/datasets/toy/images?split=test").get_json()
+    assert train["total"] == 4
+    assert test["total"] == 1
+    assert train["split"] == "train"
+
+
+def test_list_images_rejects_bad_split(client):
+    response = client.get("/api/datasets/toy/images?split=banana")
+    assert response.status_code == 400
 
 
 def test_image_meta(client):
-    data = client.get("/api/datasets/toy/000000000/meta").get_json()
+    data = client.get("/api/datasets/toy/train/000000000/meta").get_json()
     assert data["width"] > 0
     assert data["has_mask"] is True
+    assert data["split"] == "train"
 
 
 def test_segment_success(client, app):
@@ -89,11 +96,18 @@ def test_segment_success(client, app):
     assert data["status"] == "success"
     assert data["mode_used"] in ("flood", "closed_gap", "grabcut", "loop")
     assert data["stats"]["num_crops"] > 0
-    assert data["stats"]["ms_total"] >= 0
 
     mask = _decode(data["mask_base64"])
     assert mask.shape == gt.shape
     assert iou(mask, gt) > 0.8
+
+
+def test_segment_reads_the_requested_split(client, app):
+    payload, gt = _segment_payload(app, split="val")
+    response = client.post("/api/segment", json=payload)
+    assert response.status_code == 200
+    mask = _decode(response.get_json()["mask_base64"])
+    assert mask.shape == gt.shape
 
 
 def test_segment_requires_stroke(client, app):
@@ -102,6 +116,13 @@ def test_segment_requires_stroke(client, app):
     response = client.post("/api/segment", json=payload)
     assert response.status_code == 400
     assert "stroke_mask" in response.get_json()["message"]
+
+
+def test_segment_rejects_bad_split(client, app):
+    payload, _ = _segment_payload(app)
+    payload["split"] = "banana"
+    response = client.post("/api/segment", json=payload)
+    assert response.status_code == 400
 
 
 def test_segment_rejects_too_many_crops(client, app):
@@ -133,6 +154,8 @@ def test_segment_line_mode(client, app):
 
 
 def test_upload_then_save_mask(client):
+    # Use a throwaway dataset so the upload cannot pollute the shared toy split.
+    dataset = "uploads"
     image = np.zeros((240, 320, 3), np.uint8)
     cv2.rectangle(image, (60, 50), (260, 190), (40, 160, 90), -1)
     ok, buf = cv2.imencode(".png", image)
@@ -140,7 +163,12 @@ def test_upload_then_save_mask(client):
 
     upload = client.post(
         "/api/image/upload",
-        json={"dataset": "toy", "name": "uploaded.png", "image_base64": data_url},
+        json={
+            "dataset": dataset,
+            "split": "train",
+            "name": "uploaded.png",
+            "image_base64": data_url,
+        },
     )
     assert upload.status_code == 200
     name = upload.get_json()["image"]
@@ -149,28 +177,38 @@ def test_upload_then_save_mask(client):
     mask[50:190, 60:260] = 255
     saved = client.post(
         "/api/mask/save",
-        json={"dataset": "toy", "image": name, "mask_base64": _encode(mask)},
+        json={
+            "dataset": dataset,
+            "split": "train",
+            "image": name,
+            "mask_base64": _encode(mask),
+        },
     )
     assert saved.status_code == 200
 
-    fetched = client.get(f"/api/mask/toy/{name}")
+    fetched = client.get(f"/api/mask/{dataset}/train/{name}")
     assert fetched.status_code == 200
     restored = _decode(fetched.get_json()["mask_base64"])
     assert np.array_equal(restored, mask)
 
 
 def test_media_served(client):
-    response = client.get("/media/toy/rgb/000000000.jpg")
+    response = client.get("/media/toy/train/im/000000000.jpg")
     assert response.status_code == 200
     assert response.mimetype == "image/jpeg"
+
+
+def test_media_serves_gt_edge(client):
+    response = client.get("/media/toy/train/gt_edge/000000000.png")
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize(
     "url",
     [
-        "/media/toy/rgb/..%2F..%2Fsecret.png",
-        "/media/toy/rgb/....%2F%2Fsecret.png",
-        "/api/mask/toy/..%2F..%2Fsecret",
+        "/media/toy/train/im/..%2F..%2Fsecret.png",
+        "/media/toy/train/im/....%2F%2Fsecret.png",
+        "/api/mask/toy/train/..%2F..%2Fsecret",
     ],
 )
 def test_path_traversal_is_rejected(client, url):
@@ -180,9 +218,9 @@ def test_path_traversal_is_rejected(client, url):
 
 def test_legacy_predict_crops(client, app):
     index = app.extensions["bam_index"]
-    name = index.list_images("toy")[0]
-    rgb = index.load_rgb("toy", name)
-    gt = index.load_mask("toy", name)
+    name = index.list_images("toy", "train")[0]
+    rgb = index.load_rgb("toy", "train", name)
+    gt = index.load_mask("toy", "train", name)
     height, width = gt.shape
 
     crops = []
@@ -217,7 +255,7 @@ def test_legacy_predict_crops(client, app):
 
 def test_legacy_single_crop(client, app):
     index = app.extensions["bam_index"]
-    rgb = index.load_rgb("toy", index.list_images("toy")[0])
+    rgb = index.load_rgb("toy", "train", index.list_images("toy", "train")[0])
     patch = rgb[20:276, 20:276]
     ok, buf = cv2.imencode(".png", cv2.cvtColor(patch, cv2.COLOR_RGB2BGR))
     response = client.post(
@@ -235,7 +273,8 @@ def test_legacy_single_crop(client, app):
 def test_config_endpoint(client):
     data = client.get("/api/config").get_json()["config"]
     assert data["crop_size"] == 256
-    assert data["stride"] == 128
+    assert data["crop_stride"] == 128
+    assert data["splits"] == ["train", "val", "test"]
 
 
 def test_413_on_oversized_payload(client):

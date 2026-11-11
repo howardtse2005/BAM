@@ -18,7 +18,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import Config  # noqa: E402
+from config import RGB_MEAN, RGB_STD, Config  # noqa: E402
 from training.dataset import build_dataset  # noqa: E402
 
 
@@ -51,7 +51,7 @@ def denormalise(image: np.ndarray, mean, std) -> np.ndarray:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Visualise dataset crops")
     parser.add_argument("--config", default=None)
-    parser.add_argument("--split", default="train")
+    parser.add_argument("--split", default="train", choices=["train", "val", "test"])
     parser.add_argument("--count", type=int, default=8)
     parser.add_argument("--index", type=int, default=None, help="single sample index")
     parser.add_argument("--out", default="datasets/_qa/crops")
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for index in indices:
         item = dataset[index]
-        rgb = denormalise(item["image"].numpy(), cfg.data.rgb_mean, cfg.data.rgb_std)
+        rgb = denormalise(item["image"].numpy(), RGB_MEAN, RGB_STD)
         stroke = item["image"][3].numpy()
         target = item["target"][0].numpy()
 

@@ -139,13 +139,15 @@ class Predictor:
     def __init__(
         self,
         backend: BaseBackend,
-        mean: tuple = (0.485, 0.456, 0.406, 0.0),
-        std: tuple = (0.229, 0.224, 0.225, 1.0),
+        mean: tuple | None = None,
+        std: tuple | None = None,
         batch_size: int = 16,
     ) -> None:
         self.backend = backend
-        self.mean = np.asarray(mean, np.float32).reshape(1, 4, 1, 1)
-        self.std = np.asarray(std, np.float32).reshape(1, 4, 1, 1)
+        from config import RGB_MEAN, RGB_STD
+
+        self.mean = np.asarray(mean if mean is not None else RGB_MEAN, np.float32).reshape(1, 4, 1, 1)
+        self.std = np.asarray(std if std is not None else RGB_STD, np.float32).reshape(1, 4, 1, 1)
         self.batch_size = max(1, int(batch_size))
         self.last_ms = 0.0
         self.last_batches = 0

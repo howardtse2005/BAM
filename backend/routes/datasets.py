@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from flask import Blueprint, request, send_file
 
-from ..deps import cfg, fail, index, ok
-from ..schemas import ValidationError, safe_name
+from ..deps import fail, index, ok
+from ..schemas import ValidationError, safe_name, safe_split
 from ..services.storage import StorageError
 
 bp = Blueprint("datasets_api", __name__)
 
-MEDIA_SUBDIRS = {"rgb", "gt", "gt_edge", "labels"}
+MEDIA_SUBDIRS = {"im", "gt", "gt_edge"}
 
 
 @bp.get("/api/datasets")
@@ -22,7 +22,8 @@ def list_datasets():
 def list_images(dataset: str):
     try:
         safe_name(dataset, "dataset")
-        names = index().list_images(dataset)
+        split = safe_split(request.args.get("split", "train"))
+        names = index().list_images(dataset, split)
     except ValidationError as exc:
         return fail(exc, 400)
     except KeyError as exc:
@@ -33,6 +34,7 @@ def list_images(dataset: str):
     window = names[offset : offset + limit]
     return ok(
         dataset=dataset,
+        split=split,
         total=len(names),
         offset=offset,
         limit=limit,
@@ -40,13 +42,14 @@ def list_images(dataset: str):
     )
 
 
-@bp.get("/api/datasets/<dataset>/<image>/meta")
-def image_meta(dataset: str, image: str):
+@bp.get("/api/datasets/<dataset>/<split>/<image>/meta")
+def image_meta(dataset: str, split: str, image: str):
     try:
         safe_name(dataset, "dataset")
+        split = safe_split(split)
         safe_name(image, "image")
-        rgb = index().load_rgb(dataset, image)
-        has_mask = index().mask_path(dataset, image) is not None
+        rgb = index().load_rgb(dataset, split, image)
+        has_mask = index().mask_path(dataset, split, image) is not None
     except ValidationError as exc:
         return fail(exc, 400)
     except KeyError as exc:
@@ -54,24 +57,23 @@ def image_meta(dataset: str, image: str):
 
     return ok(
         dataset=dataset,
+        split=split,
         image=image,
         width=int(rgb.shape[1]),
         height=int(rgb.shape[0]),
         has_mask=bool(has_mask),
-        canonical_short_side=cfg().data.canonical_short_side,
     )
 
 
-@bp.get("/media/<dataset>/<sub>/<path:name>")
-def media(dataset: str, sub: str, name: str):
+@bp.get("/media/<dataset>/<split>/<sub>/<path:name>")
+def media(dataset: str, split: str, sub: str, name: str):
     if sub not in MEDIA_SUBDIRS:
         return fail("invalid media type", 404)
     try:
         safe_name(dataset, "dataset")
+        split = safe_split(split)
         safe_name(name, "filename")
-        # Resolve through the index so /media/demo/rgb/000000000 also works when
-        # the stored file is 000000000.jpg.
-        path = index().resolve(dataset, sub, name)
+        path = index().resolve(dataset, split, sub, name)
     except (ValidationError, StorageError) as exc:
         return fail(exc, 400)
     except KeyError as exc:

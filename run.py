@@ -34,22 +34,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cfg = Config.load(args.config, args.overrides)
     if args.host:
-        cfg.server.host = args.host
+        cfg.host = args.host
     if args.port:
-        cfg.server.port = args.port
+        cfg.port = args.port
     if args.debug:
-        cfg.server.debug = True
+        cfg.debug = True
     cfg.validate()
 
-    cfg.dataset_root.mkdir(parents=True, exist_ok=True)
+    cfg.datasets_root.mkdir(parents=True, exist_ok=True)
 
     from backend.app import create_app
 
     app = create_app(cfg)
 
-    url = f"http://{'127.0.0.1' if cfg.server.host == '0.0.0.0' else cfg.server.host}:{cfg.server.port}"
+    url = f"http://{'127.0.0.1' if cfg.host == '0.0.0.0' else cfg.host}:{cfg.port}"
     print(f"[bam] serving on {url}")
-    print(f"[bam] datasets: {cfg.dataset_root}")
+    print(f"[bam] datasets: {cfg.datasets_root}")
 
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
@@ -60,13 +60,13 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError:
             print("[bam] waitress is not installed; falling back to the dev server")
         else:
-            serve(app, host=cfg.server.host, port=cfg.server.port, threads=8)
+            serve(app, host=cfg.host, port=cfg.port, threads=8)
             return 0
 
     app.run(
-        host=cfg.server.host,
-        port=cfg.server.port,
-        debug=cfg.server.debug,
+        host=cfg.host,
+        port=cfg.port,
+        debug=cfg.debug,
         threaded=True,
         use_reloader=False,
     )

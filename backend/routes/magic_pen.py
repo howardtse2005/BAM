@@ -116,7 +116,7 @@ def segment():
         return fail(exc, 400)
 
     try:
-        rgb = index().load_rgb(req.dataset, req.image)
+        rgb = index().load_rgb(req.dataset, req.split, req.image)
     except KeyError as exc:
         return fail(exc, 404)
     except Exception as exc:

@@ -13,8 +13,13 @@ async function parse(response) {
 }
 
 export class FileSystem {
-  constructor(dataset) {
+  constructor(dataset, split = "train") {
     this.dataset = dataset;
+    this.split = split;
+  }
+
+  setSplit(split) {
+    this.split = split;
   }
 
   async health() {
@@ -27,7 +32,11 @@ export class FileSystem {
 
   async images() {
     const data = await parse(
-      await fetch(`/api/datasets/${encodeURIComponent(this.dataset)}/images?limit=1000`)
+      await fetch(
+        `/api/datasets/${encodeURIComponent(this.dataset)}/images?split=${encodeURIComponent(
+          this.split
+        )}&limit=1000`
+      )
     );
     return data.images || [];
   }
@@ -35,14 +44,18 @@ export class FileSystem {
   async meta(name) {
     return parse(
       await fetch(
-        `/api/datasets/${encodeURIComponent(this.dataset)}/${encodeURIComponent(name)}/meta`
+        `/api/datasets/${encodeURIComponent(this.dataset)}/${encodeURIComponent(
+          this.split
+        )}/${encodeURIComponent(name)}/meta`
       )
     );
   }
 
   async mask(name) {
     const response = await fetch(
-      `/api/mask/${encodeURIComponent(this.dataset)}/${encodeURIComponent(name)}`
+      `/api/mask/${encodeURIComponent(this.dataset)}/${encodeURIComponent(
+        this.split
+      )}/${encodeURIComponent(name)}`
     );
     if (response.status === 404) return null;
     const data = await parse(response);
@@ -56,6 +69,7 @@ export class FileSystem {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           dataset: this.dataset,
+          split: this.split,
           image: name,
           mask_base64: maskBase64,
         }),
@@ -68,7 +82,12 @@ export class FileSystem {
       await fetch("/api/image/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dataset: this.dataset, name, image_base64: dataUrl }),
+        body: JSON.stringify({
+          dataset: this.dataset,
+          split: this.split,
+          name,
+          image_base64: dataUrl,
+        }),
       })
     );
   }
@@ -84,8 +103,10 @@ export class FileSystem {
   }
 }
 
-export function imageUrl(dataset, name) {
-  return `/media/${encodeURIComponent(dataset)}/rgb/${encodeURIComponent(name)}`;
+export function imageUrl(dataset, split, name) {
+  return `/media/${encodeURIComponent(dataset)}/${encodeURIComponent(split)}/im/${encodeURIComponent(
+    name
+  )}`;
 }
 
 export function loadImage(src) {

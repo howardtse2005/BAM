@@ -1,12 +1,11 @@
-"""Generate a synthetic demo dataset.
+"""Generate a synthetic demo dataset in the BAM layout.
 
-This is not training data. It exists so the whole pipeline -- normalise, manifest,
-split, dataset, model, server, UI -- can be exercised end to end before a real
-dataset is downloaded.
+This is not training data. It exists so the whole pipeline -- preprocess, train,
+serve -- can be exercised before a real dataset is downloaded.
 
     python tools/make_demo_subset.py --count 24
-    python -m training.prepare.normalize --name demo --source datasets/_raw/demo --tier A
-    python -m training.prepare.split
+    python -m training.prepare.preprocess --dataset datasets/demo
+    python -m training.train --set epochs=1
 """
 
 from __future__ import annotations
@@ -60,8 +59,7 @@ def _shape_mask(
     if kind == 0:
         cv2.ellipse(mask, (cx, cy), (rx, ry), angle, 0, 360, 255, -1)
     elif kind == 1:
-        rect = ((cx, cy), (rx * 2, ry * 2), angle)
-        box = cv2.boxPoints(rect).astype(np.int32)
+        box = cv2.boxPoints(((cx, cy), (rx * 2, ry * 2), angle)).astype(np.int32)
         cv2.fillPoly(mask, [box], 255)
     elif kind == 2:
         n = int(rng.integers(5, 9))
@@ -98,41 +96,51 @@ def make_scene(
     alpha = cv2.GaussianBlur((mask > 0).astype(np.float32), (0, 0), 0.8)[..., None]
     rgb = rgb * (1 - alpha) + obj * alpha
 
-    # A soft shadow makes the boundary a genuine appearance discontinuity.
     shadow = cv2.GaussianBlur((mask > 0).astype(np.float32), (0, 0), 6) * 0.25
     rgb = rgb * (1 - shadow[..., None])
 
-    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
-    return rgb, mask
+    return np.clip(rgb, 0, 255).astype(np.uint8), mask
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Create a synthetic demo dataset")
-    parser.add_argument("--out", default="datasets/_raw/demo")
+    parser.add_argument("--dataset", default="datasets/_raw/demo")
     parser.add_argument("--count", type=int, default=24)
     parser.add_argument("--width", type=int, default=900)
     parser.add_argument("--height", type=int, default=640)
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args(argv)
 
-    root = Path(args.out)
-    images = root / "images"
-    masks = root / "masks"
-    images.mkdir(parents=True, exist_ok=True)
-    masks.mkdir(parents=True, exist_ok=True)
-
+    root = Path(args.dataset)
     rng = np.random.default_rng(args.seed)
-    for i in range(args.count):
-        rgb, mask = make_scene(rng, args.height, args.width)
-        name = f"{i:04d}"
-        imwrite(images / f"{name}.jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
-        imwrite(masks / f"{name}.png", mask)
 
-    print(f"wrote {args.count} synthetic pairs to {root}")
+    n_train = max(1, int(round(args.count * 0.8)))
+    n_val = max(1, int(round(args.count * 0.1)))
+    plan = [
+        ("train", n_train),
+        ("val", n_val),
+        ("test", max(0, args.count - n_train - n_val)),
+    ]
+
+    written = 0
+    for split, count in plan:
+        im_dir = root / split / "im"
+        gt_dir = root / split / "gt"
+        im_dir.mkdir(parents=True, exist_ok=True)
+        gt_dir.mkdir(parents=True, exist_ok=True)
+        for _ in range(count):
+            rgb, mask = make_scene(rng, args.height, args.width)
+            stem = f"{written:04d}"
+            imwrite(im_dir / f"{stem}.jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+            imwrite(gt_dir / f"{stem}.png", mask)
+            written += 1
+        print(f"  {split}: {count}")
+
+    print(f"wrote {written} synthetic pairs to {root}")
     print(
         "next:\n"
-        f"  python -m training.prepare.normalize --name demo --source {root} --tier A\n"
-        "  python -m training.prepare.split"
+        f"  python -m training.prepare.preprocess --dataset {root} --out datasets/demo\n"
+        f"  python -m training.train --set dataset={root.name} --set epochs=1"
     )
     return 0
 

@@ -16,14 +16,16 @@ function boot0() {
   const wrap = document.getElementById("canvas-wrap");
   if (!stage || !wrap) return;
 
-  const fs = new FileSystem(boot.dataset);
+  const split = boot.split || "train";
+  const fs = new FileSystem(boot.dataset, split);
   const canvas = new EditorCanvas({
     stage,
     wrap,
     dataset: boot.dataset,
+    split,
     image: boot.image,
     cropSize: boot.cropSize,
-    stride: boot.stride,
+    stride: boot.cropStride || 128,
     maxCrops: boot.maxCrops,
   });
   const settings = new Settings(canvas);
@@ -38,6 +40,13 @@ function boot0() {
       ui.updateModel(health.model);
     } catch (error) {
       ui.onError(error);
+    }
+
+    try {
+      const config = await fs.config();
+      canvas.shortSide = config.config.short_side;
+    } catch {
+      /* keep the default */
     }
 
     if (boot.image) {

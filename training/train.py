@@ -1,11 +1,12 @@
 """Training entry point.
 
-    python -m training.train --config config.yaml
-    python -m training.train --set train.epochs=10 --set train.batch_size=16
-    python -m training.train --dry-run          # synthetic batch, no data needed
+    python -m training.train                      # defaults from config.yaml
+    python -m training.train --set epochs=10 --set batch_size=16
+    python -m training.train --dry-run            # synthetic batch, no data needed
 
-The loop is deliberately plain: AdamW, cosine schedule with warmup, AMP on CUDA,
-EMA weights, early stopping on validation boundary F@2px.
+Plain loop: AdamW, cosine schedule with warmup, AMP on CUDA, EMA weights, early
+stopping on validation boundary F@2px. The dataset is read straight from
+``datasets/<name>/{train,val,test}``; there is no manifest to maintain.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
-import hashlib
 import json
 import math
 import os
@@ -32,7 +32,7 @@ if __package__ in (None, ""):  # allow `python training/train.py`
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import Config, add_config_args  # noqa: E402
-from training.dataset import build_dataset, load_manifest  # noqa: E402
+from training.dataset import build_dataset, dataset_fingerprint, scan_split  # noqa: E402
 from training.losses import BAMLoss  # noqa: E402
 from training.metrics import MetricAccumulator, evaluate_masks  # noqa: E402
 from training.unet import build_model  # noqa: E402
@@ -47,7 +47,7 @@ def resolve_device(name: str) -> torch.device:
     if name == "auto":
         name = "cuda" if torch.cuda.is_available() else "cpu"
     if name == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("train.device=cuda but CUDA is not available")
+        raise RuntimeError("train_device=cuda but CUDA is not available")
     return torch.device(name)
 
 
@@ -73,14 +73,6 @@ def git_commit() -> str:
         return out.stdout.strip() or "unknown"
     except Exception:
         return "unknown"
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 class ModelEMA:
@@ -115,7 +107,7 @@ def save_checkpoint(
     path: Path,
     model: nn.Module,
     cfg: Config,
-    manifest_hash: str,
+    dataset_hash: str,
     epoch: int,
     metrics: dict,
 ) -> None:
@@ -124,13 +116,14 @@ def save_checkpoint(
         "model_state": model.state_dict(),
         "config": cfg.to_dict(),
         "model_config": model.config_dict() if hasattr(model, "config_dict") else {},
-        "manifest_hash": manifest_hash,
-        "data_tier": cfg.data.tier,
+        "dataset": cfg.dataset,
+        "dataset_hash": dataset_hash,
+        "data_tier": cfg.tier,
         "epoch": int(epoch),
         "metrics": {k: float(v) for k, v in metrics.items()},
         "git_commit": git_commit(),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "format": "bam-1",
+        "format": "bam-2",
     }
     tmp = path.with_name(path.name + ".tmp")
     torch.save(payload, tmp)
@@ -176,7 +169,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--resume", default=None, help="checkpoint to resume from")
-    parser.add_argument("--manifest", default=None, help="override manifest path")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -187,9 +179,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def dry_run(cfg: Config, device: torch.device) -> int:
     model = build_model(cfg).to(device)
-    criterion = BAMLoss(pos_weight=cfg.train.pos_weight)
-    images = torch.randn(2, 4, cfg.data.crop_size, cfg.data.crop_size, device=device)
-    target = torch.zeros(2, 1, cfg.data.crop_size, cfg.data.crop_size, device=device)
+    criterion = BAMLoss(pos_weight=cfg.pos_weight)
+    images = torch.randn(2, 4, cfg.crop_size, cfg.crop_size, device=device)
+    target = torch.zeros(2, 1, cfg.crop_size, cfg.crop_size, device=device)
     target[:, :, 100:104, 60:200] = 1.0
     weight = torch.ones_like(target)
     logits = model(images)
@@ -217,13 +209,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cfg = Config.load(args.config, args.overrides)
     if args.epochs is not None:
-        cfg.train.epochs = int(args.epochs)
+        cfg.epochs = int(args.epochs)
     if args.batch_size is not None:
-        cfg.train.batch_size = int(args.batch_size)
+        cfg.batch_size = int(args.batch_size)
     cfg.validate()
 
     seed_everything(cfg.seed)
-    device = resolve_device(cfg.train.device)
+    device = resolve_device(cfg.train_device)
 
     if device.type == "cpu":
         torch.set_num_threads(min(8, os.cpu_count() or 4))
@@ -231,18 +223,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         return dry_run(cfg, device)
 
-    manifest_path = Path(args.manifest) if args.manifest else cfg.dataset_root / "manifest.json"
-    load_manifest(manifest_path)  # fail fast on a malformed manifest
-    manifest_hash = file_sha256(manifest_path)
+    train_ds = build_dataset(cfg, "train", train=True, length=cfg.crops_per_epoch)
+    val_ds = build_dataset(cfg, "val", train=False, length=cfg.val_crops)
 
-    train_ds = build_dataset(
-        cfg, "train", train=True, length=cfg.train.crops_per_epoch, manifest=manifest_path
-    )
-    val_ds = build_dataset(
-        cfg, "val", train=False, length=cfg.train.val_crops, manifest=manifest_path
-    )
+    files_by_split = {"train": train_ds.files, "val": val_ds.files}
+    try:
+        files_by_split["test"] = scan_split(cfg.dataset_path, "test")
+    except (FileNotFoundError, ValueError):
+        pass
+    dataset_hash = dataset_fingerprint(files_by_split)
 
-    workers = int(cfg.data.num_workers)
+    workers = int(cfg.num_workers)
     loader_kwargs = dict(
         num_workers=workers,
         pin_memory=device.type == "cuda",
@@ -250,25 +241,25 @@ def main(argv: list[str] | None = None) -> int:
         prefetch_factor=4 if workers > 0 else None,
     )
     train_loader = DataLoader(
-        train_ds, batch_size=cfg.train.batch_size, shuffle=False, drop_last=True, **loader_kwargs
+        train_ds, batch_size=cfg.batch_size, shuffle=False, drop_last=True, **loader_kwargs
     )
     val_loader = DataLoader(
-        val_ds, batch_size=max(1, cfg.train.batch_size // 2), shuffle=False, **loader_kwargs
+        val_ds, batch_size=max(1, cfg.batch_size // 2), shuffle=False, **loader_kwargs
     )
 
     model = build_model(cfg).to(device)
     if device.type == "cuda":
         model = model.to(memory_format=torch.channels_last)
-    ema = ModelEMA(model, decay=cfg.train.ema_decay)
+    ema = ModelEMA(model, decay=cfg.ema_decay)
 
-    criterion = BAMLoss(pos_weight=cfg.train.pos_weight)
+    criterion = BAMLoss(pos_weight=cfg.pos_weight)
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay
+        model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
     )
 
     steps_per_epoch = max(1, len(train_loader))
-    total_steps = steps_per_epoch * cfg.train.epochs
-    warmup_steps = steps_per_epoch * cfg.train.warmup_epochs
+    total_steps = steps_per_epoch * cfg.epochs
+    warmup_steps = steps_per_epoch * cfg.warmup_epochs
 
     def lr_lambda(step: int) -> float:
         if step < warmup_steps:
@@ -278,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    use_amp = bool(cfg.train.amp and device.type == "cuda")
+    use_amp = bool(cfg.amp and device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     start_epoch = 0
@@ -287,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.resume:
         ckpt = load_checkpoint(args.resume, map_location=device)
         model.load_state_dict(ckpt["model_state"])
-        ema = ModelEMA(model, decay=cfg.train.ema_decay)
+        ema = ModelEMA(model, decay=cfg.ema_decay)
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         best_bf = float(ckpt.get("metrics", {}).get("val_bf", -1.0))
         print(f"resumed from {args.resume} at epoch {start_epoch}")
@@ -296,22 +287,21 @@ def main(argv: list[str] | None = None) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     cfg.to_yaml(run_dir / "config.yaml")
     (run_dir / "git_commit.txt").write_text(git_commit(), encoding="utf-8")
-    (run_dir / "manifest_hash.txt").write_text(manifest_hash, encoding="utf-8")
+    (run_dir / "dataset_hash.txt").write_text(dataset_hash, encoding="utf-8")
 
-    log_path = run_dir / "metrics.csv"
-    log_file = log_path.open("w", newline="", encoding="utf-8")
+    log_file = (run_dir / "metrics.csv").open("w", newline="", encoding="utf-8")
     writer = csv.writer(log_file)
     writer.writerow(
         ["epoch", "lr", "loss", "bce", "dice", "l1", "val_bf", "val_iou", "val_biou", "seconds"]
     )
 
     print(
-        f"device={device} params={model.count_parameters()} "
+        f"dataset={cfg.dataset} device={device} params={model.count_parameters()} "
         f"train={len(train_ds)} val={len(val_ds)} steps/epoch={steps_per_epoch}"
     )
 
-    global_step = start_epoch * steps_per_epoch
-    for epoch in range(start_epoch, cfg.train.epochs):
+    epoch = start_epoch
+    for epoch in range(start_epoch, cfg.epochs):
         train_ds.set_epoch(epoch)
         model.train()
         running = {"loss": 0.0, "bce": 0.0, "dice": 0.0, "l1": 0.0}
@@ -331,20 +321,19 @@ def main(argv: list[str] | None = None) -> int:
             optimizer.zero_grad(set_to_none=True)
             if use_amp:
                 scaler.scale(loss).backward()
-                if cfg.train.grad_clip > 0:
+                if cfg.grad_clip > 0:
                     scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
+                    nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
-                if cfg.train.grad_clip > 0:
-                    nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
+                if cfg.grad_clip > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
                 optimizer.step()
 
             scheduler.step()
             ema.update(model)
-            global_step += 1
 
             for key in running:
                 running[key] += parts[key]
@@ -387,22 +376,16 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         score = float(val_metrics.get("bf", 0.0))
-        save_checkpoint(
-            run_dir / "last.pth", ema.module, cfg, manifest_hash, epoch, val_metrics
-        )
+        save_checkpoint(run_dir / "last.pth", ema.module, cfg, dataset_hash, epoch, val_metrics)
         if score > best_bf:
             best_bf = score
             patience = 0
-            save_checkpoint(
-                run_dir / "best.pth", ema.module, cfg, manifest_hash, epoch, val_metrics
-            )
-            save_checkpoint(
-                cfg.model_path, ema.module, cfg, manifest_hash, epoch, val_metrics
-            )
-            print(f"  new best val_bf={best_bf:.4f} -> {cfg.model_path}")
+            save_checkpoint(run_dir / "best.pth", ema.module, cfg, dataset_hash, epoch, val_metrics)
+            save_checkpoint(cfg.model_file, ema.module, cfg, dataset_hash, epoch, val_metrics)
+            print(f"  new best val_bf={best_bf:.4f} -> {cfg.model_file}")
         else:
             patience += 1
-            if patience >= cfg.train.early_stop_patience:
+            if patience >= cfg.early_stop:
                 print(f"early stop after {patience} epochs without improvement")
                 break
 
@@ -410,9 +393,10 @@ def main(argv: list[str] | None = None) -> int:
     summary = {
         "best_val_bf": best_bf,
         "run_dir": str(run_dir),
-        "epochs_run": epoch + 1 if cfg.train.epochs else 0,
-        "data_tier": cfg.data.tier,
-        "manifest_hash": manifest_hash,
+        "epochs_run": epoch + 1 if cfg.epochs else 0,
+        "dataset": cfg.dataset,
+        "data_tier": cfg.tier,
+        "dataset_hash": dataset_hash,
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))

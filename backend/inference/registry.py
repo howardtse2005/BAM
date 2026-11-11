@@ -15,6 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
+from config import RGB_MEAN, RGB_STD
+
 from .predictor import MockBackend, OnnxBackend, Predictor, TorchBackend
 
 
@@ -75,28 +77,28 @@ class ModelRegistry:
             return {}
 
     def _build_torch(self):
-        path = self.cfg.model_path
+        path = self.cfg.model_file
         if not path.is_file():
             raise FileNotFoundError(f"checkpoint not found: {path}")
         backend = TorchBackend(
             path,
-            device=self.cfg.infer.device,
-            threads=self.cfg.infer.threads,
+            device=self.cfg.infer_device,
+            threads=self.cfg.threads,
         )
         return backend, self._checkpoint_meta(path)
 
     def _build_onnx(self, which: str):
         raw = (
-            self.cfg.infer.onnx_int8_path if which == "onnx_int8" else self.cfg.infer.onnx_path
+            self.cfg.onnx_int8_path if which == "onnx_int8" else self.cfg.onnx_path
         )
         path = self._resolve(raw)
         if not path.is_file():
             raise FileNotFoundError(f"onnx model not found: {path}")
-        return OnnxBackend(path, name=which, threads=self.cfg.infer.threads), {"data_tier": "unknown"}
+        return OnnxBackend(path, name=which, threads=self.cfg.threads), {"data_tier": "unknown"}
 
     def load(self) -> None:
         self.attempts = []
-        want = self.cfg.infer.backend
+        want = self.cfg.backend
 
         if want == "mock":
             order = ["mock"]
@@ -112,7 +114,7 @@ class ModelRegistry:
         for name in order:
             try:
                 if name == "mock":
-                    if not self.cfg.infer.allow_mock:
+                    if not self.cfg.allow_mock:
                         raise ModelUnavailable("mock backend disabled by config")
                     backend, meta = MockBackend(), {"data_tier": "none"}
                 elif name == "torch":
@@ -121,7 +123,7 @@ class ModelRegistry:
                     backend, meta = self._build_onnx(name)
 
                 tier = str(meta.get("data_tier", "unknown"))
-                if tier == "B" and self.cfg.data.tier != "B":
+                if tier == "B" and self.cfg.tier != "B":
                     raise ModelUnavailable(
                         "checkpoint was trained on research-tier data (B); "
                         "set data.tier=B explicitly to load it"
@@ -129,11 +131,11 @@ class ModelRegistry:
 
                 predictor = Predictor(
                     backend,
-                    mean=self.cfg.data.rgb_mean,
-                    std=self.cfg.data.rgb_std,
-                    batch_size=self.cfg.infer.batch_size,
+                    mean=RGB_MEAN,
+                    std=RGB_STD,
+                    batch_size=self.cfg.infer_batch,
                 )
-                predictor.backend.warmup(self.cfg.infer.crop_size)
+                predictor.backend.warmup(self.cfg.crop_size)
 
                 self.predictor = predictor
                 self.meta = {**meta, **backend.info()}
@@ -166,7 +168,7 @@ class ModelRegistry:
             raise ModelUnavailable(self.error or "model unavailable")
         import time
 
-        size = self.cfg.infer.crop_size
+        size = self.cfg.crop_size
         rgb = np.zeros((size, size, 3), np.uint8)
         stroke = np.zeros((size, size), np.uint8)
         stroke[size // 2 - 2 : size // 2 + 2, 20:-20] = 255
@@ -180,14 +182,14 @@ class ModelRegistry:
             "available": self.available,
             "model": self.meta.get("backend", "none"),
             "is_mock": bool(self.meta.get("is_mock", False)),
-            "device": self.cfg.infer.device,
+            "device": self.cfg.infer_device,
             "data_tier": self.meta.get("data_tier", "unknown"),
             "epoch": self.meta.get("epoch"),
             "manifest_hash": self.meta.get("manifest_hash"),
             "attempts": self.attempts,
             "error": self.error,
-            "crop_size": self.cfg.infer.crop_size,
-            "batch_size": self.cfg.infer.batch_size,
+            "crop_size": self.cfg.crop_size,
+            "batch_size": self.cfg.infer_batch,
         }
         if self.predictor is not None:
             payload["last_ms"] = round(self.predictor.last_ms, 2)

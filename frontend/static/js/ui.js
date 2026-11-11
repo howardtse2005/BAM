@@ -20,10 +20,12 @@ export class UI {
     this.modal = el("modal");
     this.list = el("image-list");
     this.search = el("modal-search");
+    this.splitSelect = el("split-select");
 
     this.bindToolbar();
     this.bindTopbar();
     this.bindModal();
+    this.bindSplit();
 
     initTheme(el("theme-toggle"), () => this.canvas.refreshTheme());
 
@@ -78,6 +80,35 @@ export class UI {
         : this.images;
       this.renderList(filtered);
     });
+  }
+
+  bindSplit() {
+    if (!this.splitSelect) return;
+    this.splitSelect.value = this.bootstrap.split || "train";
+    this.splitSelect.addEventListener("change", () => this.setSplit(this.splitSelect.value));
+  }
+
+  async setSplit(split) {
+    this.fs.setSplit(split);
+    this.canvas.setSplit(split);
+    if (this.splitSelect) this.splitSelect.value = split;
+
+    const url = new URL(window.location.href);
+    url.searchParams.set("split", split);
+    window.history.replaceState({}, "", url);
+
+    try {
+      const images = await this.fs.images();
+      if (images.length) {
+        await this.loadImage(images[0]);
+      } else {
+        this.canvas.clearMask(false);
+        el("image-name").textContent = "no images";
+        this.hint(`No images in the ${split} split`);
+      }
+    } catch (error) {
+      this.onError(error);
+    }
   }
 
   setTool(tool) {

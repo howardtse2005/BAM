@@ -2,8 +2,22 @@ import numpy as np
 import pytest
 import torch
 
-from training.dataset import BAMDataset, build_dataset, geometric_augment
+from training.dataset import BAMDataset, build_dataset, geometric_augment, scan_split
 from training.sampler import CropSampler
+
+
+def test_scan_split_pairs_images_and_masks(cfg):
+    files = scan_split(cfg.dataset_path, "train")
+    assert len(files) == 4
+    for item in files:
+        assert item["im"].is_file()
+        assert item["gt"].is_file()
+        assert item["edge"] is not None
+
+
+def test_scan_split_missing_split_raises(cfg):
+    with pytest.raises(FileNotFoundError):
+        scan_split(cfg.dataset_path, "nonexistent")
 
 
 def test_dataset_item_shapes(cfg):
@@ -38,6 +52,13 @@ def test_dataset_length_controls_epoch_size(cfg):
     assert dataset[20]["image"].shape == (4, 256, 256)
 
 
+def test_dataset_reads_the_requested_split(cfg):
+    train = BAMDataset(cfg.dataset_path, "train", cfg, train=True, length=1)
+    test = BAMDataset(cfg.dataset_path, "test", cfg, train=False, length=1)
+    assert train.split == "train" and test.split == "test"
+    assert train.files[0]["stem"] != test.files[0]["stem"]
+
+
 def test_geometric_augment_keeps_arrays_aligned():
     height, width = 64, 80
     rgb = np.zeros((height, width, 3), np.uint8)
@@ -53,11 +74,8 @@ def test_geometric_augment_keeps_arrays_aligned():
     )
 
     assert out_rgb.shape[:2] == out_gt.shape == out_stroke.shape == out_valid.shape
-
     columns = set(np.nonzero(out_gt.any(axis=0))[0].tolist())
-    # Horizontal flip maps column c to width-1-c: 40,41 -> 39,38.
     assert columns == {38, 39}
-    # The stroke must have moved with it, not stayed behind.
     stroke_columns = set(np.nonzero(out_stroke.any(axis=0))[0].tolist())
     assert min(stroke_columns) <= 38 and max(stroke_columns) >= 39
 
@@ -101,20 +119,3 @@ def test_crop_sampler_respects_weights():
     for _ in range(50):
         sampler.sample(state, rng)
         assert sampler.last_bucket == "boundary"
-
-
-def test_manifest_roundtrip(cfg):
-    dataset = BAMDataset(
-        samples=[{"id": "toy/000000000", "rgb": "toy/rgb/000000000.jpg", "gt": "toy/gt/000000000.png", "gt_edge": "toy/gt_edge/000000000.png"}],
-        dataset_root=cfg.dataset_root,
-        cfg=cfg,
-        train=False,
-        length=1,
-    )
-    item = dataset[0]
-    assert item["image"].shape == (4, 256, 256)
-
-
-def test_missing_split_raises(cfg):
-    with pytest.raises(ValueError):
-        build_dataset(cfg, "nonexistent")

@@ -1,4 +1,4 @@
-"""Mask load/save and image upload."""
+"""Mask load/save and image upload, scoped to a dataset split."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from flask import Blueprint, request
 from imgio import canonical_size, imwrite, resize
 
 from ..deps import cfg, fail, index, ok
-from ..schemas import ValidationError, safe_name
+from ..schemas import ValidationError, safe_name, safe_split
 from ..services.storage import (
     StorageError,
     decode_data_url,
@@ -31,12 +31,13 @@ def _require_json() -> dict:
     return payload
 
 
-@bp.get("/api/mask/<dataset>/<image>")
-def get_mask(dataset: str, image: str):
+@bp.get("/api/mask/<dataset>/<split>/<image>")
+def get_mask(dataset: str, split: str, image: str):
     try:
         safe_name(dataset, "dataset")
+        split = safe_split(split)
         safe_name(image, "image")
-        path = index().mask_path(dataset, image)
+        path = index().mask_path(dataset, split, image)
     except ValidationError as exc:
         return fail(exc, 400)
     except KeyError as exc:
@@ -44,7 +45,7 @@ def get_mask(dataset: str, image: str):
 
     if path is None:
         return fail("no mask for this image", 404)
-    mask = index().load_mask(dataset, image)
+    mask = index().load_mask(dataset, split, image)
     return ok(mask_base64=encode_png_base64(mask), path=str(path))
 
 
@@ -53,6 +54,7 @@ def save_mask():
     try:
         payload = _require_json()
         dataset = safe_name(payload.get("dataset", ""), "dataset")
+        split = safe_split(payload.get("split"))
         image = safe_name(payload.get("image", ""), "image")
         raw = payload.get("mask_base64")
         if not isinstance(raw, str) or not raw:
@@ -64,7 +66,7 @@ def save_mask():
         return fail(exc, 400)
 
     try:
-        rgb = index().load_rgb(dataset, image)
+        rgb = index().load_rgb(dataset, split, image)
     except KeyError as exc:
         return fail(exc, 404)
 
@@ -73,13 +75,12 @@ def save_mask():
         mask = resize(mask, width, height, is_mask=True)
 
     try:
-        path = safe_join(cfg().dataset_root, dataset, "gt", f"{image}.png")
+        path = safe_join(cfg().datasets_root, dataset, split, "gt", f"{image}.png")
     except StorageError as exc:
         return fail(exc, 400)
-
     imwrite(path, mask)
     index().refresh(force=True)
-    return ok(path=str(path), width=width, height=height)
+    return ok(path=str(path), width=width, height=height, split=split)
 
 
 @bp.post("/api/image/upload")
@@ -87,6 +88,7 @@ def upload_image():
     try:
         payload = _require_json()
         dataset = safe_name(payload.get("dataset", ""), "dataset")
+        split = safe_split(payload.get("split"))
         raw_name = payload.get("name", "")
         if not isinstance(raw_name, str) or not raw_name:
             raise ValidationError("name is required")
@@ -104,21 +106,19 @@ def upload_image():
         return fail(exc, 400)
 
     height, width = bgr.shape[:2]
-    target_w, target_h, scale = canonical_size(
-        height, width, cfg().data.canonical_short_side
-    )
+    target_w, target_h, scale = canonical_size(height, width, cfg().short_side)
     if (target_w, target_h) != (width, height):
         bgr = cv2.resize(bgr, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
     try:
-        path = safe_join(cfg().dataset_root, dataset, "rgb", f"{stem}.jpg")
+        path = safe_join(cfg().datasets_root, dataset, split, "im", f"{stem}.jpg")
     except StorageError as exc:
         return fail(exc, 400)
-
     imwrite(path, bgr)
     index().refresh(force=True)
     return ok(
         dataset=dataset,
+        split=split,
         image=stem,
         width=int(target_w),
         height=int(target_h),
@@ -127,12 +127,13 @@ def upload_image():
     )
 
 
-@bp.delete("/api/mask/<dataset>/<image>")
-def delete_mask(dataset: str, image: str):
+@bp.delete("/api/mask/<dataset>/<split>/<image>")
+def delete_mask(dataset: str, split: str, image: str):
     try:
         safe_name(dataset, "dataset")
+        split = safe_split(split)
         safe_name(image, "image")
-        path = index().mask_path(dataset, image)
+        path = index().mask_path(dataset, split, image)
     except ValidationError as exc:
         return fail(exc, 400)
     except KeyError as exc:

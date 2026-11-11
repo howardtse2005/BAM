@@ -42,7 +42,12 @@
           </div>
           <div class="dataset-card__body">
             <h3>{{ ds.name }}</h3>
-            <p>{{ ds.count }} image{{ '' if ds.count == 1 else 's' }}</p>
+            <p>
+              {{ ds.count }} image{{ '' if ds.count == 1 else 's' }}
+              {% if ds.splits %}
+              · {% for name, n in ds.splits.items() %}{{ name }} {{ n }}{% if not loop.last %} · {% endif %}{% endfor %}
+              {% endif %}
+            </p>
           </div>
           <div class="dataset-card__tags">
             {% if ds.has_gt %}<span class="tag">GT</span>{% endif %}

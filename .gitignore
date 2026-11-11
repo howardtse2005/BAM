@@ -10,6 +10,7 @@ env/
 
 # Datasets: raw archives and generated pixels are not versioned.
 # The manifest and the per-dataset README are.
+datasets/DIS5K*
 datasets/_raw/
 datasets/_qa/
 datasets/*/rgb/

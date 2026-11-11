@@ -10,7 +10,7 @@
  * translate/scale transform, so there is no separate coordinate bookkeeping.
  */
 
-import { loadImage } from "./file_system.js";
+import { imageUrl, loadImage } from "./file_system.js";
 import { CropCollector, sendSegment } from "./magic_pen.js";
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
@@ -31,8 +31,10 @@ export class EditorCanvas {
     this.maskCtx = this.maskCanvas.getContext("2d", { willReadFrequently: true });
 
     this.dataset = options.dataset;
+    this.split = options.split || "train";
     this.imageName = options.image || "";
     this.cropSize = options.cropSize || 256;
+    this.shortSide = options.shortSide || 640;
     this.stride = options.stride || 128;
     this.maxCrops = options.maxCrops || 64;
 
@@ -120,12 +122,21 @@ export class EditorCanvas {
 
   async load(name) {
     if (!name) return false;
-    const url = `/media/${encodeURIComponent(this.dataset)}/rgb/${encodeURIComponent(name)}`;
+    const url = imageUrl(this.dataset, this.split, name);
     const image = await loadImage(url);
+
+    // Work at the canonical short side, never at native resolution. A 4K source
+    // would otherwise exceed the server's canvas limit and, more importantly,
+    // would feed the model an object scale it was never trained on.
+    const native = Math.min(image.naturalWidth, image.naturalHeight);
+    const scale = Math.min(1, this.shortSide / Math.max(1, native));
+    const width = Math.max(1, Math.round(image.naturalWidth * scale));
+    const height = Math.max(1, Math.round(image.naturalHeight * scale));
+
     this.imageName = name;
-    this.resize(image.naturalWidth, image.naturalHeight);
+    this.resize(width, height);
     this.imageCtx.clearRect(0, 0, this.width, this.height);
-    this.imageCtx.drawImage(image, 0, 0);
+    this.imageCtx.drawImage(image, 0, 0, width, height);
     this.clearMask(false);
     this.fit();
     this.updatePreview();
@@ -235,6 +246,11 @@ export class EditorCanvas {
   }
 
   // ------------------------------------------------------------------ tools
+
+  setSplit(split) {
+    this.split = split;
+    this.imageName = "";
+  }
 
   setTool(tool) {
     this.tool = tool;
@@ -459,6 +475,7 @@ export class EditorCanvas {
     try {
       const payload = {
         dataset: this.dataset,
+        split: this.split,
         image: this.imageName,
         canvas: { width: this.width, height: this.height },
         crops,

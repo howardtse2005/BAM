@@ -43,21 +43,23 @@ def warmup():
 @bp.get("/api/config")
 def public_config():
     """The subset of config the UI needs. Never exposes filesystem paths."""
-    cfg_obj = cfg()
+    c = cfg()
     return ok(
         config={
-            "crop_size": cfg_obj.infer.crop_size,
-            "stride": cfg_obj.infer.stride,
-            "max_crops": cfg_obj.infer.max_crops,
-            "working_short_side": cfg_obj.data.canonical_short_side,
+            "dataset": c.dataset,
+            "crop_size": c.crop_size,
+            "crop_stride": c.crop_stride,
+            "max_crops": c.max_crops,
+            "short_side": c.short_side,
+            "splits": ["train", "val", "test"],
             "params": {
-                "sensitivity": cfg_obj.infer.sensitivity,
-                "threshold": cfg_obj.infer.threshold,
-                "edge_threshold": cfg_obj.infer.edge_threshold,
-                "expand": cfg_obj.infer.expand,
-                "smooth": cfg_obj.infer.smooth,
-                "mode": cfg_obj.infer.mode,
-                "merge_weighting": cfg_obj.infer.merge_weighting,
+                "sensitivity": c.sensitivity,
+                "threshold": c.threshold,
+                "edge_threshold": c.edge_threshold,
+                "expand": c.expand,
+                "smooth": c.smooth,
+                "mode": c.mode,
+                "merge_weighting": c.merge_weighting,
             },
         }
     )

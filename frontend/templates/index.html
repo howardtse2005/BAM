@@ -60,6 +60,15 @@
     <a class="icon-btn" href="{{ url_for('pages.datasets') }}" title="Back to datasets" aria-label="Back to datasets">
       <svg width="18" height="18"><use href="#i-back"/></svg>
     </a>
+    <label class="split-picker">
+      <span class="split-picker__label">split</span>
+      <select id="split-select" aria-label="Dataset split">
+        {% for name in ['train', 'val', 'test'] %}
+        <option value="{{ name }}" {% if name == split %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
     <div class="topbar__title">
       <strong>{{ dataset }}</strong>
       <span class="muted">/</span>
@@ -246,9 +255,10 @@
 <script>
   window.BAM_BOOTSTRAP = {
     dataset: {{ dataset|tojson }},
+    split: {{ split|tojson }},
     image: {{ image|tojson }},
     cropSize: {{ crop_size|int }},
-    stride: {{ stride|int }},
+    cropStride: {{ crop_stride|int }},
     maxCrops: {{ max_crops|int }}
   };
 </script>

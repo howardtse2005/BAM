@@ -1,34 +1,43 @@
 """Dataset discovery and cached image loading.
 
-A dataset is any directory under ``datasets/`` that contains ``rgb/``. The GT
-and stroke folders are optional: a user can label a fresh folder that has only
-images.
+A dataset is any folder under ``datasets/`` that contains at least one split:
+
+    <dataset>/train/im/   <dataset>/train/gt/   <dataset>/train/gt_edge/
+    <dataset>/val/im/     ...
+    <dataset>/test/im/    ...
+
+Images are addressed by ``(dataset, split, stem)``. GT and stroke folders are
+optional: a fresh folder with only ``im/`` can still be labelled.
 """
 
 from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from urllib.parse import quote
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 from imgio import imread_gray, imread_rgb, to_binary_mask
-from .cache import LRUCache
+from training.paths import IMAGE_EXTS, SPLITS
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+from .cache import LRUCache
 
 
 @dataclass
 class DatasetEntry:
     name: str
     root: Path
-    images: dict[str, Path] = field(default_factory=dict)
+    images: dict[str, dict[str, Path]] = field(default_factory=dict)
 
     @property
     def count(self) -> int:
-        return len(self.images)
+        return sum(len(v) for v in self.images.values())
+
+    def split_counts(self) -> dict[str, int]:
+        return {split: len(v) for split, v in self.images.items()}
 
 
 class DatasetIndex:
@@ -46,12 +55,15 @@ class DatasetIndex:
             return ()
         stamps = []
         for path in sorted(self.root.iterdir()):
-            rgb = path / "rgb"
-            if path.is_dir() and rgb.is_dir():
-                try:
-                    stamps.append((path.name, int(rgb.stat().st_mtime)))
-                except OSError:
-                    continue
+            if not path.is_dir():
+                continue
+            for split in SPLITS:
+                im_dir = path / split / "im"
+                if im_dir.is_dir():
+                    try:
+                        stamps.append((path.name, split, int(im_dir.stat().st_mtime)))
+                    except OSError:
+                        continue
         return tuple(stamps)
 
     def refresh(self, force: bool = False) -> None:
@@ -62,14 +74,22 @@ class DatasetIndex:
 
             entries: dict[str, DatasetEntry] = {}
             for path in sorted(self.root.iterdir()) if self.root.is_dir() else []:
-                rgb = path / "rgb"
-                if not (path.is_dir() and rgb.is_dir()):
+                if not path.is_dir():
                     continue
-                images: dict[str, Path] = {}
-                for file in sorted(rgb.iterdir()):
-                    if file.is_file() and file.suffix.lower() in IMAGE_EXTS:
-                        images[file.stem] = file
-                entries[path.name] = DatasetEntry(name=path.name, root=path, images=images)
+                splits: dict[str, dict[str, Path]] = {}
+                for split in SPLITS:
+                    im_dir = path / split / "im"
+                    if not im_dir.is_dir():
+                        continue
+                    images = {
+                        file.stem: file
+                        for file in sorted(im_dir.iterdir())
+                        if file.is_file() and file.suffix.lower() in IMAGE_EXTS
+                    }
+                    if images:
+                        splits[split] = images
+                if splits:
+                    entries[path.name] = DatasetEntry(name=path.name, root=path, images=splits)
 
             self._entries = entries
             self._stamp = stamp
@@ -81,17 +101,26 @@ class DatasetIndex:
         self.refresh()
         out = []
         for entry in self._entries.values():
+            splits = entry.split_counts()
+            primary = next(
+                (s for s in ("train", "val", "test") if entry.images.get(s)),
+                next(iter(entry.images), None),
+            )
+            thumb = None
+            if primary:
+                first = entry.images[primary][next(iter(entry.images[primary]))]
+                thumb = (
+                    f"/media/{quote(entry.name, safe='')}/{primary}/im/"
+                    f"{quote(first.name, safe='')}"
+                )
             out.append(
                 {
                     "name": entry.name,
                     "count": entry.count,
-                    "has_gt": (entry.root / "gt").is_dir(),
-                    "has_edge": (entry.root / "gt_edge").is_dir(),
-                    "thumb": (
-                        f"/media/{entry.name}/rgb/{entry.images[next(iter(entry.images))].name}"
-                        if entry.images
-                        else None
-                    ),
+                    "splits": splits,
+                    "has_gt": any((entry.root / s / "gt").is_dir() for s in splits),
+                    "has_edge": any((entry.root / s / "gt_edge").is_dir() for s in splits),
+                    "thumb": thumb,
                 }
             )
         return out
@@ -100,44 +129,31 @@ class DatasetIndex:
         self.refresh()
         return list(self._entries)
 
-    def list_images(self, dataset: str) -> list[str]:
-        self.refresh()
-        entry = self._entry(dataset)
-        return sorted(entry.images)
-
     def _entry(self, dataset: str) -> DatasetEntry:
         entry = self._entries.get(dataset)
         if entry is None:
             raise KeyError(f"unknown dataset: {dataset}")
         return entry
 
-    def image_path(self, dataset: str, name: str) -> Path:
+    def splits(self, dataset: str) -> list[str]:
         self.refresh()
-        entry = self._entry(dataset)
-        path = entry.images.get(name)
-        if path is None:
-            raise KeyError(f"unknown image {name!r} in dataset {dataset!r}")
-        return path
+        return list(self._entry(dataset).images)
 
-    def mask_path(self, dataset: str, name: str) -> Path | None:
+    def list_images(self, dataset: str, split: str) -> list[str]:
         self.refresh()
         entry = self._entry(dataset)
-        stem = Path(name).stem
-        for sub in ("gt", "labels"):
-            folder = entry.root / sub
-            if not folder.is_dir():
-                continue
-            for ext in IMAGE_EXTS:
-                candidate = folder / f"{stem}{ext}"
-                if candidate.is_file():
-                    return candidate
-        return None
+        images = entry.images.get(split)
+        if images is None:
+            raise KeyError(f"dataset {dataset!r} has no split {split!r}")
+        return sorted(images)
 
-    def resolve(self, dataset: str, sub: str, name: str) -> Path | None:
-        """Resolve a file in a dataset subfolder, with or without an extension."""
+    # -- pixels ------------------------------------------------------------ #
+
+    def resolve(self, dataset: str, split: str, sub: str, name: str) -> Path | None:
+        """Resolve a file in a dataset split, with or without an extension."""
         self.refresh()
         entry = self._entry(dataset)
-        folder = entry.root / sub
+        folder = entry.root / split / sub
         if not folder.is_dir():
             return None
 
@@ -152,29 +168,36 @@ class DatasetIndex:
                 return candidate
         return None
 
-    # -- pixels ------------------------------------------------------------ #
+    def image_path(self, dataset: str, split: str, name: str) -> Path:
+        path = self.resolve(dataset, split, "im", name)
+        if path is None:
+            raise KeyError(f"unknown image {name!r} in {dataset}/{split}")
+        return path
 
-    def load_rgb(self, dataset: str, name: str) -> np.ndarray:
-        path = self.image_path(dataset, name)
-        key = ("rgb", dataset, name, path.stat().st_mtime_ns)
+    def mask_path(self, dataset: str, split: str, name: str) -> Path | None:
+        return self.resolve(dataset, split, "gt", name)
+
+    def load_rgb(self, dataset: str, split: str, name: str) -> np.ndarray:
+        path = self.image_path(dataset, split, name)
+        key = ("rgb", dataset, split, name, path.stat().st_mtime_ns)
         return self._images.get_or_create(key, lambda: imread_rgb(path))
 
-    def load_mask(self, dataset: str, name: str) -> np.ndarray | None:
-        path = self.mask_path(dataset, name)
+    def load_mask(self, dataset: str, split: str, name: str) -> np.ndarray | None:
+        path = self.mask_path(dataset, split, name)
         if path is None:
             return None
-        key = ("gt", dataset, name, path.stat().st_mtime_ns)
+        key = ("gt", dataset, split, name, path.stat().st_mtime_ns)
         return self._images.get_or_create(key, lambda: to_binary_mask(imread_gray(path)))
 
-    def load_stroke(self, dataset: str, name: str) -> np.ndarray | None:
-        path = self.resolve(dataset, "gt_edge", name)
+    def load_stroke(self, dataset: str, split: str, name: str) -> np.ndarray | None:
+        path = self.resolve(dataset, split, "gt_edge", name)
         if path is None:
             return None
-        key = ("edge", dataset, name, path.stat().st_mtime_ns)
+        key = ("edge", dataset, split, name, path.stat().st_mtime_ns)
         return self._images.get_or_create(key, lambda: imread_gray(path))
 
-    def thumbnail(self, dataset: str, name: str, size: int = 160) -> np.ndarray:
-        rgb = self.load_rgb(dataset, name)
+    def thumbnail(self, dataset: str, split: str, name: str, size: int = 160) -> np.ndarray:
+        rgb = self.load_rgb(dataset, split, name)
         h, w = rgb.shape[:2]
         scale = size / max(h, w)
         resized = cv2.resize(
