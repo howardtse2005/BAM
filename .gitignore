@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+.workbuddy-ai/
+
+# Datasets: raw archives and generated pixels are not versioned.
+# The manifest and the per-dataset README are.
+datasets/_raw/
+datasets/_qa/
+datasets/*/rgb/
+datasets/*/gt/
+datasets/*/gt_edge/
+datasets/manifest.json
+!datasets/README.md
+
+# Model weights are large binaries; publish them as release assets.
+model/*.pth
+model/*.pt
+model/*.onnx
+
+# Training artifacts
+runs/
+reports/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

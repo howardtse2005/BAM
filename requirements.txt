@@ -1,0 +1,19 @@
+# Core runtime (the app runs without torch when using an ONNX backend)
+numpy>=1.24
+opencv-python-headless>=4.8
+Flask>=3.0
+PyYAML>=6.0
+Pillow>=10.0
+waitress>=3.0
+
+# Training and torch inference
+# Install the CPU wheel on machines without CUDA:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+
+# Optional: faster CPU inference and int8 export
+# onnx>=1.16
+# onnxruntime>=1.18
+
+# Development
+pytest>=8.0

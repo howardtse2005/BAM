@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+{% block title %}{{ dataset }} / {{ image }} — BAM{% endblock %}
+
+{% block body %}
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-brush" viewBox="0 0 24 24">
+    <path d="M5 19c3.5-.5 5.5-2 7-5.5S15 7 18 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M4 20l3.2-1.1a1.6 1.6 0 0 0 1-1l.6-2.1-2.7-2.7-2.1.6a1.6 1.6 0 0 0-1 1L2 18z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-eraser" viewBox="0 0 24 24">
+    <path d="M8 20h11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M4.5 14.5l6-6a2 2 0 0 1 2.8 0l3.2 3.2a2 2 0 0 1 0 2.8l-4 4H8z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-wand" viewBox="0 0 24 24">
+    <path d="M4 20l9-9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M15 4v4M13 6h4M18 10v3M16.5 11.5h3M9 4v3M7.5 5.5h3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-fill" viewBox="0 0 24 24">
+    <path d="M5 11l6-6 7 7-6 6a2 2 0 0 1-2.8 0L5 13.8A2 2 0 0 1 5 11z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M20 15c0 1.7-1.3 3-3 3s-3-1.3-3-3 3-4.5 3-4.5S20 13.3 20 15z" fill="none" stroke="currentColor" stroke-width="1.4"/>
+  </symbol>
+  <symbol id="i-pan" viewBox="0 0 24 24">
+    <path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24">
+    <path d="M9 7L4 12l5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M4 12h9a6 6 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" transform="translate(0,-6)"/>
+  </symbol>
+  <symbol id="i-redo" viewBox="0 0 24 24">
+    <path d="M15 7l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M20 12h-9a6 6 0 0 0 0 12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" transform="translate(0,-6)"/>
+  </symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24">
+    <path d="M2.5 12S6 6 12 6s9.5 6 9.5 6-3.5 6-9.5 6S2.5 12 2.5 12z" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    <circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/>
+  </symbol>
+  <symbol id="i-save" viewBox="0 0 24 24">
+    <path d="M12 4v10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M8 11l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M5 19h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-back" viewBox="0 0 24 24">
+    <path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-fit" viewBox="0 0 24 24">
+    <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-zoom-in" viewBox="0 0 24 24">
+    <circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="1.7"/>
+    <path d="M15 15l5 5M10.5 7.5v6M7.5 10.5h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-zoom-out" viewBox="0 0 24 24">
+    <circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="1.7"/>
+    <path d="M15 15l5 5M7.5 10.5h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+  </symbol>
+</svg>
+
+<div class="app">
+  <header class="topbar">
+    <a class="icon-btn" href="{{ url_for('pages.datasets') }}" title="Back to datasets" aria-label="Back to datasets">
+      <svg width="18" height="18"><use href="#i-back"/></svg>
+    </a>
+    <div class="topbar__title">
+      <strong>{{ dataset }}</strong>
+      <span class="muted">/</span>
+      <span id="image-name">{{ image or 'select an image' }}</span>
+    </div>
+    <div class="topbar__actions">
+      <button class="btn btn--ghost btn--sm" id="btn-open" type="button">Open image</button>
+      <button class="btn btn--ghost btn--sm" id="btn-upload" type="button">Upload</button>
+      <button class="btn btn--primary btn--sm" id="btn-save" type="button">
+        <svg width="15" height="15"><use href="#i-save"/></svg>
+        Save mask
+      </button>
+      <button class="icon-btn" id="theme-toggle" type="button" title="Toggle theme" aria-label="Toggle theme">◐</button>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <nav class="rail" aria-label="Tools">
+      <button class="tool" data-tool="pan" type="button" title="Pan (H)" aria-label="Pan">
+        <svg width="19" height="19"><use href="#i-pan"/></svg>
+      </button>
+      <button class="tool is-active" data-tool="brush" type="button" title="Brush (B)" aria-label="Brush">
+        <svg width="19" height="19"><use href="#i-brush"/></svg>
+      </button>
+      <button class="tool" data-tool="eraser" type="button" title="Eraser (E)" aria-label="Eraser">
+        <svg width="19" height="19"><use href="#i-eraser"/></svg>
+      </button>
+      <button class="tool" data-tool="magic" type="button" title="Magic pen (M)" aria-label="Magic pen">
+        <svg width="19" height="19"><use href="#i-wand"/></svg>
+      </button>
+      <button class="tool" data-tool="fill" type="button" title="Fill (F)" aria-label="Fill">
+        <svg width="19" height="19"><use href="#i-fill"/></svg>
+      </button>
+
+      <div class="rail__sep"></div>
+
+      <button class="tool" id="btn-undo" type="button" title="Undo (Ctrl+Z)" aria-label="Undo">
+        <svg width="19" height="19"><use href="#i-undo"/></svg>
+      </button>
+      <button class="tool" id="btn-redo" type="button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
+        <svg width="19" height="19"><use href="#i-redo"/></svg>
+      </button>
+
+      <div class="rail__sep"></div>
+
+      <button class="tool" id="btn-zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">
+        <svg width="19" height="19"><use href="#i-zoom-in"/></svg>
+      </button>
+      <button class="tool" id="btn-zoom-out" type="button" title="Zoom out (-)" aria-label="Zoom out">
+        <svg width="19" height="19"><use href="#i-zoom-out"/></svg>
+      </button>
+      <button class="tool" id="btn-fit" type="button" title="Fit (0)" aria-label="Fit to screen">
+        <svg width="19" height="19"><use href="#i-fit"/></svg>
+      </button>
+    </nav>
+
+    <main class="stage" id="stage">
+      <div class="canvas-wrap" id="canvas-wrap">
+        <canvas id="image-canvas"></canvas>
+        <canvas id="stroke-canvas"></canvas>
+        <canvas id="preview-canvas"></canvas>
+        <canvas id="mask-canvas" class="is-hidden"></canvas>
+      </div>
+      <div class="stage__empty" id="stage-empty">
+        <p>Open an image to start</p>
+        <button class="btn btn--primary btn--sm" id="btn-open-2" type="button">Open image</button>
+      </div>
+      <div class="stage__hint" id="stage-hint" hidden></div>
+      <div class="stage__progress" id="stage-progress" hidden>
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="progress-text">snapping…</span>
+      </div>
+    </main>
+
+    <aside class="inspector" aria-label="Settings">
+      <section class="panel">
+        <h2 class="panel__title">Magic pen</h2>
+        <div class="field">
+          <label for="p-sensitivity">Sensitivity <output id="o-sensitivity">1.0</output></label>
+          <input type="range" id="p-sensitivity" min="1" max="3" step="0.1" value="1">
+        </div>
+        <div class="field">
+          <label for="p-edge">Edge threshold <output id="o-edge">0.45</output></label>
+          <input type="range" id="p-edge" min="0.1" max="0.9" step="0.05" value="0.45">
+        </div>
+        <div class="field">
+          <label for="p-mask">Mask threshold <output id="o-mask">0.50</output></label>
+          <input type="range" id="p-mask" min="0.1" max="0.9" step="0.05" value="0.5">
+        </div>
+        <div class="field">
+          <label for="p-expand">Expand <output id="o-expand">0 px</output></label>
+          <input type="range" id="p-expand" min="-12" max="12" step="1" value="0">
+        </div>
+        <div class="field">
+          <label for="p-smooth">Smoothing <output id="o-smooth">2</output></label>
+          <input type="range" id="p-smooth" min="0" max="4" step="1" value="2">
+        </div>
+        <div class="field">
+          <label for="p-mode">Mode</label>
+          <select id="p-mode">
+            <option value="object">Object (fill)</option>
+            <option value="line">Line (edge only)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="p-weight">Merge</label>
+          <select id="p-weight">
+            <option value="uniform">Uniform</option>
+            <option value="gaussian">Gaussian</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel__title">Brush</h2>
+        <div class="field">
+          <label for="p-brush">Size <output id="o-brush">8 px</output></label>
+          <input type="range" id="p-brush" min="1" max="60" step="1" value="8">
+        </div>
+        <div class="field field--row">
+          <label for="c-show-mask">Show mask</label>
+          <input type="checkbox" id="c-show-mask" checked>
+        </div>
+        <div class="field field--row">
+          <label for="c-show-edge">Show edge</label>
+          <input type="checkbox" id="c-show-edge">
+        </div>
+        <div class="field">
+          <label for="p-opacity">Mask opacity <output id="o-opacity">35%</output></label>
+          <input type="range" id="p-opacity" min="10" max="90" step="5" value="35">
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel__title">Model</h2>
+        <dl class="kv">
+          <dt>Backend</dt><dd id="m-backend">—</dd>
+          <dt>Device</dt><dd id="m-device">—</dd>
+          <dt>Last stroke</dt><dd id="m-latency">—</dd>
+          <dt>Data tier</dt><dd id="m-tier">—</dd>
+        </dl>
+        <p class="warn" id="m-warning" hidden></p>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel__title">Image</h2>
+        <dl class="kv">
+          <dt>Size</dt><dd id="i-size">—</dd>
+          <dt>Mask</dt><dd id="i-mask">empty</dd>
+          <dt>Crops</dt><dd id="i-crops">0</dd>
+        </dl>
+      </section>
+    </aside>
+  </div>
+
+  <footer class="statusbar">
+    <span id="s-size">—</span>
+    <span class="dot"></span>
+    <span id="s-zoom">100%</span>
+    <span class="dot"></span>
+    <span id="s-crops">0 crops</span>
+    <span class="dot"></span>
+    <span id="s-latency">—</span>
+    <span class="spacer"></span>
+    <span id="s-backend" class="muted">—</span>
+  </footer>
+</div>
+
+<input type="file" id="file-input" accept="image/*" hidden>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal__box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <header class="modal__head">
+      <h2 id="modal-title">Open image</h2>
+      <button class="icon-btn" id="modal-close" type="button" aria-label="Close">✕</button>
+    </header>
+    <input class="input" id="modal-search" type="search" placeholder="Filter by name…" aria-label="Filter images">
+    <ul class="image-list" id="image-list"></ul>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.BAM_BOOTSTRAP = {
+    dataset: {{ dataset|tojson }},
+    image: {{ image|tojson }},
+    cropSize: {{ crop_size|int }},
+    stride: {{ stride|int }},
+    maxCrops: {{ max_crops|int }}
+  };
+</script>
+<script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
+{% endblock %}
