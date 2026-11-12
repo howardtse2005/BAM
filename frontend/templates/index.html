@@ -161,6 +161,10 @@
         <h2 class="panel__title">Magic brush</h2>
         <p class="panel__note">Draw along the edge, then accept the predicted line.</p>
         <div class="field">
+          <label for="p-magic-width">Brush width <output id="o-magic-width">32 px · core 20</output></label>
+          <input type="range" id="p-magic-width" min="8" max="96" step="2" value="32">
+        </div>
+        <div class="field">
           <label for="p-sensitivity">Sensitivity <output id="o-sensitivity">1.0</output></label>
           <input type="range" id="p-sensitivity" min="1" max="3" step="0.1" value="1">
         </div>
@@ -228,6 +232,7 @@
           <dt>Line</dt><dd id="i-line">none</dd>
           <dt>Crop</dt><dd id="i-crop-size">—</dd>
           <dt>Crops</dt><dd id="i-crops">0</dd>
+          <dt>Band</dt><dd id="i-band">—</dd>
         </dl>
       </section>
     </aside>
@@ -272,7 +277,11 @@
     cropStride: {{ crop_stride|int }},
     maxCrops: {{ max_crops|int }},
     lineWidth: {{ line_width|int }},
-    fillClose: {{ fill_close|int }}
+    fillClose: {{ fill_close|int }},
+    magicWidth: {{ magic_brush_width|int }},
+    magicPromptRatio: {{ magic_prompt_ratio|float }},
+    magicPromptMin: {{ magic_prompt_min|int }},
+    magicPromptMax: {{ magic_prompt_max|int }}
   };
 </script>
 <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>

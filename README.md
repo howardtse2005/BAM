@@ -317,9 +317,9 @@ python run.py --host 0.0.0.0 --serve waitress    # LAN / production
    the object edge. Crops are collected along the stroke by arc length, so a
    fast flick and a slow drag cover the boundary equally well.
 4. **Review** — on release, each crop is run through the UNet together with the
-   stroke itself, the per-crop predictions are merged, and the result is thinned
-   and re-widened into a **uniform clean line**. The line replaces the wobbly
-   stroke on screen; nothing is committed yet.
+   stroke itself, the per-crop predictions are merged, clipped to the stroke you
+   drew, and the result is thinned and re-widened into a **uniform clean line**.
+   The line replaces the wobbly stroke on screen; nothing is committed yet.
 5. **Decide** — the action bar offers:
    - **Accept** (`Enter`) — the line becomes the mask.
    - **Fill** — accept and immediately segment the enclosed region.
@@ -334,6 +334,33 @@ python run.py --host 0.0.0.0 --serve waitress    # LAN / production
 7. **Save** — writes `<dataset>/<split>/gt/<name>.png` at the image's native size.
 
 `Alt`+drag subtracts instead of adding. `Ctrl+Z` undoes, including a fill.
+
+### The stroke is wider than the prompt
+
+The brush you see and the stroke the model gets are two different widths:
+
+| | Width | Where it comes from |
+|---|---|---|
+| **Band** (what you draw) | 32 px by default | the *Brush width* slider, 8–96 px |
+| **Prompt** (what the model gets) | 20 px | `magic_prompt_ratio` (0.625) of the band, clamped to `[magic_prompt_min, magic_prompt_max]` |
+
+The band is drawn as a translucent wash with the solid prompt core inside it, and
+the cursor shows both rings. Crops are centred on the prompt, so the model is
+conditioned on exactly the stroke the preview highlights — but a prediction is
+allowed to sit anywhere under the band. That tolerance is what keeps the clean
+line attributable to the stroke: a line that drifts 8 px off the centreline is
+still visibly *your* stroke, while a line 8 px outside a hairline stroke looks
+like it came from nowhere.
+
+The tolerance is enforced, not hoped for. `/api/segment` masks the merged edge
+with the band (inset by half the output line width) before thinning it, so the
+returned line cannot contain a pixel outside the drawn stroke. When the model
+wanders past the band, the line is trimmed and `stats.clipped_px` reports it; the
+UI suggests widening the brush when more than 30 % of the prediction was cut.
+
+Raising `magic_prompt_max` above 20 makes the prompt itself thicker, which is
+closer to "the stroke I drew is what the model sees" but drifts away from the
+3–12 px brush widths the model was trained on.
 
 ### Crop size follows the image
 
@@ -388,7 +415,9 @@ bugs and cuts the payload roughly 20×.
   "edge_base64": "data:image/png;base64,...",   // 1-px skeleton, for debugging
   "closed": true,                               // can this line be filled?
   "crop_size": 256,
-  "stats": { "num_crops": 9, "ms_infer": 118.2, "ms_post": 21.7 }
+  "band_width": 32,                             // the stroke the user drew
+  "prompt_width": 20,                           // the stroke the model saw
+  "stats": { "num_crops": 9, "ms_infer": 118.2, "ms_post": 21.7, "clipped_px": 0 }
 }
 ```
 
@@ -413,6 +442,10 @@ lr: 0.0003
 mode: line                    # line = predict the edge, object = also fill
 line_width: 3                 # predicted line thickness, canvas px
 fill_close: 5                 # px of gap bridged before filling
+magic_brush_width: 32         # visible band, canvas px (slider default)
+magic_prompt_ratio: 0.625     # prompt stroke / band width
+magic_prompt_min: 3           # prompt is never thinner than this
+magic_prompt_max: 20          # ...nor wider
 train_device: auto
 infer_device: cpu
 backend: auto

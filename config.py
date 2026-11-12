@@ -134,6 +134,16 @@ class Config:
     mode: str = "line"                        # line = predict the edge, object = also fill
     line_width: int = 3                       # predicted line thickness, canvas px
     fill_close: int = 5                       # px of gap bridged before filling a line
+
+    # ------------------------------------------------------ magic brush geometry
+    # The user draws a *band*; the model is given a thinner *prompt* stroke inside
+    # it. The band is the tolerance the predicted line is allowed to move in, so a
+    # prediction that sits a few px off the centreline is still under the stroke
+    # instead of floating beside it.
+    magic_brush_width: int = 32               # visible band width, canvas px (slider default)
+    magic_prompt_ratio: float = 0.625         # prompt width / band width (20 px in a 32 px band)
+    magic_prompt_min: int = 3                 # prompt is never thinner than this
+    magic_prompt_max: int = 12                # ...nor wider; training brushes are 3-12 px
     merge_weighting: str = "uniform"          # uniform | gaussian
     apply_dbscan: bool = False
     apply_morphology: bool = True
@@ -204,6 +214,21 @@ class Config:
         raw = int(round(short * float(self.crop_ratio)))
         raw = max(int(self.crop_min), min(int(self.crop_size), raw))
         return max(32, (raw // 32) * 32)
+
+    def prompt_width_for(self, band_width: int | None = None) -> int:
+        """Width of the stroke actually handed to the model.
+
+        The band is what the user draws and sees; the prompt is the thin core
+        inside it that becomes the fourth channel. Keeping the prompt a fixed
+        fraction of the band would let a thick band turn into a prompt far wider
+        than any training brush, so the result is clamped to
+        ``[magic_prompt_min, magic_prompt_max]`` and never exceeds the band it
+        sits in. The frontend mirrors this formula (see ``EditorCanvas``).
+        """
+        band = int(band_width if band_width is not None else self.magic_brush_width)
+        raw = int(round(band * float(self.magic_prompt_ratio)))
+        clamped = max(int(self.magic_prompt_min), min(int(self.magic_prompt_max), raw))
+        return max(1, min(band, clamped))
 
     # ------------------------------------------------------------ serialisation
 
@@ -301,6 +326,12 @@ class Config:
             raise ValueError("line_width must be in [1, crop_size]")
         if not 0 <= self.fill_close <= 16:
             raise ValueError("fill_close must be in [0, 16]")
+        if not 4 <= self.magic_brush_width <= 160:
+            raise ValueError("magic_brush_width must be in [4, 160]")
+        if not 0.05 <= self.magic_prompt_ratio <= 1.0:
+            raise ValueError("magic_prompt_ratio must be in (0.05, 1.0]")
+        if not 1 <= self.magic_prompt_min <= self.magic_prompt_max <= 64:
+            raise ValueError("magic prompt widths must satisfy 1 <= min <= max <= 64")
         if self.merge_weighting not in ("uniform", "gaussian"):
             raise ValueError("merge_weighting must be 'uniform' or 'gaussian'")
         if not 1 <= self.max_crops <= 256:

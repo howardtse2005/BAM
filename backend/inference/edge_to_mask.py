@@ -281,6 +281,37 @@ def ribbon(edge: np.ndarray, width_px: int) -> np.ndarray:
     return cv2.dilate(edge, disk(radius))
 
 
+def stroke_band(
+    stroke: np.ndarray,
+    band_width: int,
+    prompt_width: int,
+    inset: int = 0,
+) -> np.ndarray:
+    """Pixels covered by the brush the user actually drew.
+
+    The editor draws a band but hands the model a thinner prompt stroke inside
+    it, so the band is that prompt grown by the difference in half-widths. The
+    predicted edge is masked with this before it becomes a line, which is what
+    makes every pixel the magic brush shows land under the user's stroke instead
+    of beside it.
+
+    ``inset`` shrinks the band, and is how the caller keeps the *painted* line —
+    a ribbon grown from the skeleton — inside the band rather than only its
+    centre. Returns ``{0, 255}`` so it can be used as a mask directly.
+    """
+    raw = np.asarray(stroke)
+    # Accept a boolean mask as well as the {0, 255} raster the client sends:
+    # ``bool > 127`` is False everywhere, which would silently empty the band.
+    on = raw if raw.dtype == np.bool_ else raw > 127
+    prompt = on.astype(np.uint8) * 255
+    if not prompt.any():
+        return prompt
+    extra = int(round((int(band_width) - int(prompt_width)) / 2.0)) - int(inset)
+    if extra <= 0:
+        return prompt
+    return cv2.dilate(prompt, disk(extra))
+
+
 def _largest_component(binary: np.ndarray) -> np.ndarray | None:
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
         (binary > 0).astype(np.uint8), connectivity=8
@@ -674,6 +705,7 @@ __all__ = [
     "line_is_closed",
     "fill_enclosed",
     "ribbon",
+    "stroke_band",
     "thin",
     "fill_holes",
     "guided_filter",

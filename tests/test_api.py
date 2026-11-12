@@ -237,6 +237,59 @@ def test_segment_accepts_a_smaller_crop(client, app):
 
 
 # --------------------------------------------------------------------------- #
+# The brush band: the drawn stroke is wider than the prompt the model sees
+# --------------------------------------------------------------------------- #
+
+
+def test_segment_clips_the_line_to_the_brush_band(client, app):
+    """Every pixel the magic brush shows is under the stroke the user drew."""
+    from backend.inference.edge_to_mask import stroke_band
+
+    payload, _ = _segment_payload(
+        app, extra_params={"brush_width": 32, "prompt_width": 20}
+    )
+    data = client.post("/api/segment", json=payload).get_json()
+
+    assert data["band_width"] == 32
+    assert data["prompt_width"] == 20
+
+    stroke = _decode(payload["stroke_mask"])
+    line = _decode(data["line_base64"]) > 127
+    band = stroke_band(stroke, data["band_width"], data["prompt_width"])
+    distance = cv2.distanceTransform((band == 0).astype(np.uint8), cv2.DIST_L2, 3)
+
+    # One px of slack: the line is a ribbon grown from a 1-px skeleton, so its
+    # own thickness can reach just past the band edge it was clipped to.
+    assert float(distance[line].max()) <= 1.5
+
+
+def test_segment_band_trims_a_prediction_wider_than_the_stroke(client, app):
+    """A band with no tolerance cuts the prediction back to the stroke itself."""
+    wide, _ = _segment_payload(
+        app, extra_params={"brush_width": 40, "prompt_width": 12}
+    )
+    tight, _ = _segment_payload(
+        app, extra_params={"brush_width": 12, "prompt_width": 12}
+    )
+
+    wide_stats = client.post("/api/segment", json=wide).get_json()["stats"]
+    tight_stats = client.post("/api/segment", json=tight).get_json()["stats"]
+
+    assert tight_stats["clipped_px"] > 0
+    assert wide_stats["clipped_px"] == 0
+    assert tight_stats["predicted_px"] > tight_stats["clipped_px"]
+
+
+def test_segment_clamps_the_prompt_inside_the_band(client, app):
+    payload, _ = _segment_payload(
+        app, extra_params={"brush_width": 24, "prompt_width": 999}
+    )
+    data = client.post("/api/segment", json=payload).get_json()
+    assert data["band_width"] == 24
+    assert data["prompt_width"] == 24
+
+
+# --------------------------------------------------------------------------- #
 # /api/fill: accepted line -> region
 # --------------------------------------------------------------------------- #
 
@@ -441,6 +494,9 @@ def test_config_endpoint(client):
     assert data["crop_min"] == 64
     assert data["crop_ratio"] == 0.4
     assert data["crop_stride"] == 128
+    assert data["magic_brush_width"] == 32
+    assert data["params"]["brush_width"] == 32
+    assert data["params"]["prompt_width"] == 20
     assert data["splits"] == ["train", "val", "test"]
 
 

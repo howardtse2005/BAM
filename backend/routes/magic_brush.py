@@ -8,6 +8,13 @@ The magic brush is a two-step interaction:
    the predicted **clean line**. Nothing is committed yet: the line replaces the
    wobbly stroke on screen so the user can judge it, re-stroke, or accept it.
 
+   The stroke arrives in two widths. What the user draws and sees is a *band*;
+   what the model is conditioned on is a thinner *prompt* stroke centred in it.
+   The merged edge is clipped to the band before it becomes a line, so the
+   prediction can only appear under the stroke the user actually drew — a
+   prediction that wanders off is trimmed rather than shown somewhere the user
+   never brushed.
+
 2. ``POST /api/fill`` — once the line is accepted and encloses the object, the
    enclosed region is flooded into a filled mask.
 
@@ -25,7 +32,13 @@ import numpy as np
 from flask import Blueprint, request
 
 from ..deps import cfg, fail, index, ok, registry
-from ..inference.edge_to_mask import edge_to_mask, line_is_closed, line_to_mask, ribbon
+from ..inference.edge_to_mask import (
+    edge_to_mask,
+    line_is_closed,
+    line_to_mask,
+    ribbon,
+    stroke_band,
+)
 from ..inference.merger import (
     CropPlacement,
     PredictionMerger,
@@ -171,8 +184,23 @@ def segment():
         apply_morphology=False,
     )
 
+    # Clip the prediction to the brush the user actually drew. The model sees the
+    # thin prompt stroke, so its edge can sit a few px outside it; the band is
+    # what was on screen, and a line drawn outside the stroke is a line the user
+    # cannot attribute to anything. Insetting by the ribbon radius keeps the
+    # painted line inside the band, not just the skeleton it grew from.
+    band = stroke_band(
+        req.stroke,
+        params["brush_width"],
+        params["prompt_width"],
+        inset=params["line_width"] // 2,
+    )
+    predicted = merged.edge > float(params["edge_threshold"])
+    clipped = int(np.count_nonzero(predicted & (band == 0)))
+    edge_prob = merged.edge * (band > 0)
+
     fill = edge_to_mask(
-        merged.edge,
+        edge_prob,
         req.stroke,
         rgb=rgb,
         edge_threshold=params["edge_threshold"],
@@ -209,6 +237,8 @@ def segment():
         low_confidence=bool(fill.low_confidence),
         mode_used=fill.mode,
         crop_size=int(req.crops[0].size),
+        band_width=params["brush_width"],
+        prompt_width=params["prompt_width"],
         canvas={"width": req.canvas_width, "height": req.canvas_height},
         stats={
             "num_crops": len(rgb_crops),
@@ -218,6 +248,8 @@ def segment():
             "ms_total": round(infer_ms + post_ms, 1),
             "backend": registry().meta.get("backend", "unknown"),
             "coverage": round(merged.covered / max(1, rgb.shape[0] * rgb.shape[1]), 4),
+            "predicted_px": int(predicted.sum()),
+            "clipped_px": clipped,
         },
     )
 

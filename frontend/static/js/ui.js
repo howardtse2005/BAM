@@ -127,7 +127,7 @@ export class UI {
     });
     const hints = {
       magicBrush:
-        "Drag roughly along the object edge. Release to see the predicted line, then accept it or re-stroke.",
+        "Drag along the object edge. The solid core is what the model sees; the wide band is how far the predicted line may move.",
       pan: "Drag to pan. Wheel to zoom.",
       fill: "Fill the region enclosed by the accepted line.",
     };
@@ -328,6 +328,9 @@ export class UI {
     if (el("i-crop-size") && status.cropSize) {
       el("i-crop-size").textContent = `${status.cropSize} px`;
     }
+    if (el("i-band") && status.brushWidth) {
+      el("i-band").textContent = `${status.brushWidth} / ${status.promptWidth} px`;
+    }
     if (el("s-size") && this.canvas.width) {
       el("s-size").textContent = `${this.canvas.width} × ${this.canvas.height}`;
     }
@@ -375,6 +378,17 @@ export class UI {
     this.showProposalBar(result);
     if (!result.closed) {
       this.hint("The line is open. Accept it as-is, re-stroke, or close the gap to fill.");
+    }
+
+    // The prediction is clipped to the band, so a large trim means the stroke
+    // was drawn too far from the edge or too narrow for the model's guess. That
+    // is worth saying: the trimmed line looks like a model failure otherwise.
+    const predicted = Number(stats.predicted_px || 0);
+    const clipped = Number(stats.clipped_px || 0);
+    if (predicted > 0 && clipped / predicted > 0.3) {
+      this.hint(
+        "The edge ran outside your stroke and was trimmed — widen the brush or follow the edge more closely."
+      );
     }
     this.updateImageInfo();
   }

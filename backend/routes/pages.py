@@ -51,6 +51,10 @@ def masking():
         max_crops=cfg().max_crops,
         line_width=cfg().line_width,
         fill_close=cfg().fill_close,
+        magic_brush_width=cfg().magic_brush_width,
+        magic_prompt_ratio=cfg().magic_prompt_ratio,
+        magic_prompt_min=cfg().magic_prompt_min,
+        magic_prompt_max=cfg().magic_prompt_max,
     )
 
 

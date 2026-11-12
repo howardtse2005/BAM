@@ -113,6 +113,21 @@ def parse_params(raw: dict | None, cfg) -> dict[str, Any]:
     if weighting not in ("uniform", "gaussian"):
         weighting = "uniform"
 
+    # The visible band and the prompt stroke inside it. The client sends both
+    # because it is the side that painted them; the server only checks that the
+    # prompt is a real stroke inside the band it is supposed to sit in.
+    band = int(
+        _clamp(
+            raw.get("brush_width", cfg.magic_brush_width),
+            4,
+            160,
+            cfg.magic_brush_width,
+        )
+    )
+    default_prompt = cfg.prompt_width_for(band)
+    prompt = int(_clamp(raw.get("prompt_width", default_prompt), 1, 64, default_prompt))
+    prompt = max(1, min(prompt, band))
+
     return {
         "sensitivity": _clamp(raw.get("sensitivity", cfg.sensitivity), 1.0, 3.0, 1.0),
         "threshold": _clamp(raw.get("threshold", cfg.threshold), 0.05, 0.95, 0.5),
@@ -122,6 +137,8 @@ def parse_params(raw: dict | None, cfg) -> dict[str, Any]:
         "mode": mode,
         "line_width": int(_clamp(raw.get("line_width", cfg.line_width), 1, 32, cfg.line_width)),
         "fill_close": int(_clamp(raw.get("fill_close", cfg.fill_close), 0, 16, cfg.fill_close)),
+        "brush_width": band,
+        "prompt_width": prompt,
         "merge_weighting": weighting,
         "apply_morphology": bool(raw.get("apply_morphology", cfg.apply_morphology)),
         "morph_kernel_size": int(_clamp(raw.get("morph_kernel_size", cfg.morph_kernel), 1, 15, 3)),

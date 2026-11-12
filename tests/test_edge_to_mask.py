@@ -6,6 +6,7 @@ from backend.inference.edge_to_mask import (
     edge_to_mask,
     fill_holes,
     guided_filter,
+    stroke_band,
     thin,
 )
 from training.metrics import iou
@@ -122,3 +123,54 @@ def test_expand_grows_the_mask():
 def test_shape_mismatch_raises():
     with pytest.raises(ValueError):
         edge_to_mask(np.zeros((10, 10), np.float32), np.zeros((12, 12), np.uint8))
+
+
+# --------------------------------------------------------------------------- #
+# Brush band: the visible stroke is wider than the prompt the model sees
+# --------------------------------------------------------------------------- #
+
+
+def test_band_grows_the_prompt_by_the_half_width_difference():
+    prompt = np.zeros((120, 120), np.uint8)
+    prompt[60, 10:110] = 255
+
+    band = stroke_band(prompt, band_width=32, prompt_width=20)
+    # (32 - 20) / 2 = 6 px of tolerance on each side of the prompt.
+    assert band[60, 60] == 255
+    assert band[60 - 5, 60] == 255
+    assert band[60 + 5, 60] == 255
+    assert band[60 - 7, 60] == 0
+    assert band[60 + 7, 60] == 0
+
+
+def test_band_contains_the_prompt():
+    prompt = np.zeros((80, 80), np.uint8)
+    cv2.line(prompt, (10, 40), (70, 40), 255, 7)
+
+    band = stroke_band(prompt, band_width=24, prompt_width=7)
+    assert not np.any((prompt > 0) & (band == 0))
+
+
+def test_band_inset_keeps_the_painted_line_inside():
+    prompt = np.zeros((120, 120), np.uint8)
+    prompt[60, 10:110] = 255
+
+    full = stroke_band(prompt, band_width=32, prompt_width=20)
+    inset = stroke_band(prompt, band_width=32, prompt_width=20, inset=1)
+    assert (inset > 0).sum() < (full > 0).sum()
+    assert not np.any((inset > 0) & (full == 0))
+
+
+def test_band_never_shrinks_below_the_prompt():
+    prompt = np.zeros((40, 40), np.uint8)
+    cv2.line(prompt, (5, 20), (35, 20), 255, 9)
+
+    # A prompt wider than the band is a client bug; the band still has to cover
+    # the stroke that was actually drawn, never a subset of it.
+    band = stroke_band(prompt, band_width=4, prompt_width=20)
+    assert np.array_equal(band, prompt)
+
+
+def test_band_of_an_empty_stroke_is_empty():
+    band = stroke_band(np.zeros((32, 32), np.uint8), 32, 20)
+    assert band.max() == 0

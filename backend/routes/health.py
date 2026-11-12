@@ -55,6 +55,10 @@ def public_config():
             "short_side": c.short_side,
             "line_width": c.line_width,
             "fill_close": c.fill_close,
+            "magic_brush_width": c.magic_brush_width,
+            "magic_prompt_ratio": c.magic_prompt_ratio,
+            "magic_prompt_min": c.magic_prompt_min,
+            "magic_prompt_max": c.magic_prompt_max,
             "splits": ["train", "val", "test"],
             "params": {
                 "sensitivity": c.sensitivity,
@@ -65,6 +69,8 @@ def public_config():
                 "mode": c.mode,
                 "line_width": c.line_width,
                 "fill_close": c.fill_close,
+                "brush_width": c.magic_brush_width,
+                "prompt_width": c.prompt_width_for(),
                 "merge_weighting": c.merge_weighting,
             },
         }

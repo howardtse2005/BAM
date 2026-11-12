@@ -31,6 +31,10 @@ function boot0() {
     maxCrops: boot.maxCrops,
     lineWidth: boot.lineWidth,
     fillClose: boot.fillClose,
+    magicWidth: boot.magicWidth,
+    promptRatio: boot.magicPromptRatio,
+    promptMin: boot.magicPromptMin,
+    promptMax: boot.magicPromptMax,
   });
   const settings = new Settings(canvas);
   const ui = new UI({ canvas, fs, settings, bootstrap: boot });

@@ -60,6 +60,9 @@ def test_int_and_float_coercion():
         {"port": 0},
         {"mix_boundary": 0.9},  # mixture must sum to 1
         {"depth": 0},
+        {"magic_brush_width": 2},
+        {"magic_prompt_ratio": 0.0},
+        {"magic_prompt_min": 30, "magic_prompt_max": 20},
     ],
 )
 def test_validation_rejects(payload):
@@ -89,6 +92,21 @@ def test_crop_for_tracks_the_canvas_size(height, width, expected):
 def test_unknown_override_key_is_rejected():
     with pytest.raises(ValueError):
         Config.load(overrides=["nonsense=1"])
+
+
+@pytest.mark.parametrize(
+    "band,expected",
+    [
+        (32, 20),  # 0.625 of the band, and the widest prompt allowed
+        (96, 20),  # capped: a thick band must not become a thick prompt
+        (8, 5),  # below the cap the ratio is what decides
+        (4, 3),  # never thinner than the minimum
+    ],
+)
+def test_prompt_width_tracks_the_band(band, expected):
+    cfg = Config.from_dict({})
+    assert cfg.prompt_width_for(band) == expected
+    assert 1 <= cfg.prompt_width_for(band) <= band
 
 
 def test_fingerprint_is_stable():
