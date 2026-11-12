@@ -65,10 +65,8 @@ class Config:
 
     # ------------------------------------------------------------- resolution
     short_side: int = 640                     # images are downscaled to this short side
-    crop_size: int = 256                      # training crop, and the largest inference crop
-    crop_min: int = 64                        # smallest inference crop
-    crop_ratio: float = 0.4                   # inference crop / canvas short side
-    crop_stride: int = 128                    # spacing between crops along a brush stroke
+    crop_size: int = 256                      # training crop, and the largest inference window
+    crop_min: int = 64                        # smallest inference window
     target_sigma: float = 1.0                 # width of the soft edge target
     num_workers: int = 8                      # dataloader workers
 
@@ -201,21 +199,6 @@ class Config:
 
     # --------------------------------------------------------------- geometry
 
-    def crop_for(self, height: int, width: int) -> int:
-        """Inference crop size for an image of this size.
-
-        ``crop_size`` is 40% of the canonical 640 short side, which is what
-        makes a crop a *local* view of the boundary rather than a picture of the
-        whole object. Scaling the crop with the canvas keeps that ratio, so a
-        small upload is not handed a crop that contains everything. The result
-        is clamped to ``[crop_min, crop_size]`` and snapped to a multiple of 32
-        so the UNet's four pooling stages stay exact.
-        """
-        short = max(1, min(int(height), int(width)))
-        raw = int(round(short * float(self.crop_ratio)))
-        raw = max(int(self.crop_min), min(int(self.crop_size), raw))
-        return max(32, (raw // 32) * 32)
-
     def prompt_width_for(self, band_width: int | None = None) -> int:
         """Width of the stroke actually handed to the model.
 
@@ -294,10 +277,6 @@ class Config:
             raise ValueError("crop_size must be a multiple of 32")
         if self.crop_min % 32 != 0 or not 32 <= self.crop_min <= self.crop_size:
             raise ValueError("crop_min must be a multiple of 32 in [32, crop_size]")
-        if not 0.05 <= self.crop_ratio <= 1.0:
-            raise ValueError("crop_ratio must be in (0.05, 1.0]")
-        if not 0 < self.crop_stride <= self.crop_size:
-            raise ValueError("crop_stride must be in (0, crop_size]")
         if self.brush_encoding not in ("binary", "sdf"):
             raise ValueError("brush_encoding must be 'binary' or 'sdf'")
         if self.brush_radius_min <= 0 or self.brush_radius_max < self.brush_radius_min:

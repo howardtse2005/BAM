@@ -11,7 +11,7 @@
  */
 
 import { imageUrl, loadImage } from "./file_system.js";
-import { CropCollector, sendFill, sendSegment } from "./magic_brush.js";
+import { sendFill, sendSegment } from "./magic_brush.js";
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
@@ -36,13 +36,7 @@ export class EditorCanvas {
     this.dataset = options.dataset;
     this.split = options.split || "train";
     this.imageName = options.image || "";
-    this.cropSize = options.cropSize || 256;
-    this.cropMin = options.cropMin || 64;
-    this.cropMax = options.cropMax || this.cropSize;
-    this.cropRatio = options.cropRatio || 0.4;
     this.shortSide = options.shortSide || 640;
-    this.stride = options.stride || 128;
-    this.maxCrops = options.maxCrops || 64;
     this.lineWidth = options.lineWidth || 3;
     this.fillClose = options.fillClose || 5;
 
@@ -80,11 +74,10 @@ export class EditorCanvas {
     this.future = [];
     this.historyLimit = 20;
 
-    this.collector = new CropCollector({
-      cropSize: this.cropSize,
-      stride: this.stride,
-      maxCrops: this.maxCrops,
-    });
+    // Reported by the server after a stroke: the square it cut around the
+    // stroke, and the size it was run at. Both are unknown until then — the
+    // window comes from the stroke, not from the canvas.
+    this.cropInfo = { count: 0, window: 0, size: 0 };
 
     this.strokeData = document.createElement("canvas");
     this.strokeDataCtx = this.strokeData.getContext("2d");
@@ -479,28 +472,12 @@ export class EditorCanvas {
 
   // ------------------------------------------------------------ magic brush
 
-  /**
-   * Crop size for this canvas: a fixed fraction of the short side, clamped and
-   * snapped to a multiple of 32. At the canonical 640 short side this is 256;
-   * a 400 px upload gets 160, which keeps the object at the scale the model was
-   * trained on instead of shrinking the object to a dot inside a fixed crop.
-   */
-  computeCropSize() {
-    const short = Math.min(this.width || this.shortSide, this.height || this.shortSide);
-    // The crop has to hold the whole band with context around it; a band wider
-    // than the crop would be clipped before the model ever saw its outer edge.
-    const raw = Math.max(Math.round(short * this.cropRatio), this.magicWidth * 2);
-    const bounded = Math.min(this.cropMax, Math.max(this.cropMin, raw));
-    return Math.max(32, Math.round(bounded / 32) * 32);
-  }
-
   _magicStart(x, y) {
     // A new stroke starts from a clean trail; the previous line is already in
     // the mask, so it is left alone.
     this.strokeCtx.clearRect(0, 0, this.width, this.height);
     this.strokeDataCtx.clearRect(0, 0, this.width, this.height);
     this.bandCtx.clearRect(0, 0, this.width, this.height);
-    this.collector.reset(this.computeCropSize());
     this.magicLast = null;
     this._magicDraw(x, y);
   }
@@ -542,7 +519,6 @@ export class EditorCanvas {
 
     this.magicLast = [x, y];
     this._queueStroke();
-    if (this.collector.add(x, y)) this._status();
   }
 
   /** Coalesce repaints: pointermove fires faster than the compositor redraws. */
@@ -575,30 +551,19 @@ export class EditorCanvas {
     ctx.restore();
 
     ctx.drawImage(this._drawTint(this.strokeData, this.strokeColor), 0, 0);
-
-    // Crop boxes come from the collector rather than being painted once, so a
-    // full repaint does not lose them.
-    ctx.save();
-    ctx.strokeStyle = "rgba(245, 158, 11, 0.28)";
-    ctx.lineWidth = 1;
-    for (const crop of this.collector.crops) {
-      ctx.strokeRect(crop.x0, crop.y0, crop.size, crop.size);
-    }
-    ctx.restore();
   }
 
   async _magicEnd() {
-    const crops = this.collector.crops.slice();
-    const cropSize = this.collector.cropSize;
     // Read the modifier now: the response arrives after the pointer is gone and
     // a new stroke may already have reset it.
     const subtract = this.subtract;
+    const drew = Boolean(this.magicLast);
     this.strokeCtx.clearRect(0, 0, this.width, this.height);
     this.bandCtx.clearRect(0, 0, this.width, this.height);
     this.magicLast = null;
-    if (!crops.length) return;
+    if (!drew) return;
 
-    this.onProgress?.(true, `snapping ${crops.length} crop${crops.length === 1 ? "" : "s"}…`);
+    this.onProgress?.(true, "snapping the stroke…");
     const started = performance.now();
 
     try {
@@ -607,7 +572,6 @@ export class EditorCanvas {
         split: this.split,
         image: this.imageName,
         canvas: { width: this.width, height: this.height },
-        crops,
         stroke_mask: this.strokeData.toDataURL("image/png"),
         params: {
           ...(this.getParams ? this.getParams() : {}),
@@ -619,22 +583,24 @@ export class EditorCanvas {
         },
       };
       const result = await sendSegment(payload);
+      this.cropInfo = {
+        count: 1,
+        window: result.window ? result.window.size : 0,
+        size: result.crop_size || 0,
+      };
       const committed = await this.commitLine(result.line_base64, { subtract });
       this.onSegmented?.({
         ...result,
         closed: Boolean(result.closed),
-        cropSize: result.crop_size || cropSize,
         bandWidth: result.band_width || this.magicWidth,
         promptWidth: result.prompt_width || this.promptWidth,
         elapsed: performance.now() - started,
-        crops: crops.length,
         committed,
       });
     } catch (error) {
       this.onError?.(error);
     } finally {
       this.onProgress?.(false);
-      this.collector.reset();
       this._status();
     }
   }
@@ -1009,15 +975,12 @@ export class EditorCanvas {
     return this.maskCanvas.toDataURL("image/png");
   }
 
-  get cropCount() {
-    return this.collector.count;
-  }
-
   _status() {
     this.onStatus?.({
       zoom: this.zoom,
-      crops: this.collector.count,
-      cropSize: this.collector.cropSize,
+      crops: this.cropInfo.count,
+      cropSize: this.cropInfo.size,
+      windowSize: this.cropInfo.window,
       brushWidth: this.magicWidth,
       promptWidth: this.promptWidth,
       hasMask: this.maskNonEmpty,

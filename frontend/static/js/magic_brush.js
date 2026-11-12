@@ -1,63 +1,10 @@
 /**
- * Magic brush transport: crop collection and the two server calls.
+ * Magic brush transport: the two server calls.
  *
- * The brush stroke is the only prompt. Crops are emitted by arc length, not by
- * pointer events, so a fast flick and a slow drag produce the same uniform
- * coverage along the line.
- *
- * Crop size is not fixed. It is a fraction of the canvas short side, clamped to
- * [cropMin, cropMax] and snapped to a multiple of 32, so a small image is not
- * handed a crop that contains the whole object.
+ * The stroke is the whole request. The server derives the single square that
+ * contains it, so there is no crop bookkeeping on this side: a fast flick and a
+ * slow drag both end in exactly one window and exactly one forward pass.
  */
-export class CropCollector {
-  constructor({ cropSize = 256, stride = null, maxCrops = 64 } = {}) {
-    this.maxCrops = maxCrops;
-    this.cropSize = cropSize;
-    this.stride = stride || Math.max(16, Math.round(cropSize / 2));
-    this.reset();
-  }
-
-  configure({ cropSize, stride = null } = {}) {
-    if (cropSize) this.cropSize = cropSize;
-    this.stride = stride || Math.max(16, Math.round(this.cropSize / 2));
-  }
-
-  reset(cropSize = null) {
-    if (cropSize) this.configure({ cropSize });
-    this.crops = [];
-    this.last = null;
-    this.full = false;
-    this.length = 0;
-  }
-
-  add(x, y) {
-    if (this.full) return false;
-
-    if (this.last) {
-      const step = Math.hypot(x - this.last.x, y - this.last.y);
-      this.length += step;
-      if (step < this.stride) return false;
-    }
-
-    if (this.crops.length >= this.maxCrops) {
-      this.full = true;
-      return false;
-    }
-
-    const half = this.cropSize / 2;
-    this.crops.push({
-      x0: Math.round(x - half),
-      y0: Math.round(y - half),
-      size: this.cropSize,
-    });
-    this.last = { x, y };
-    return true;
-  }
-
-  get count() {
-    return this.crops.length;
-  }
-}
 
 async function postJSON(url, payload) {
   const response = await fetch(url, {

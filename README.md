@@ -7,7 +7,7 @@ returns a clean line; a deterministic fill turns that line into a mask.
 Runs on CPU. No GPU required at inference.
 
 ```
-brush → crops → UNet (0.34 M params) → merge → clean line → fill → mask
+brush → stroke square → UNet (0.34 M params) → clean line → fill → mask
 ```
 
 ---
@@ -316,13 +316,14 @@ have already uploaded.
 
 1. **Upload** — the stage asks for an image until one is loaded.
 2. **Draw** — the magic brush (`M`) is the default tool. Drag *roughly* along
-   the object edge. Crops are collected along the stroke by arc length, so a
-   fast flick and a slow drag cover the boundary equally well.
-3. **The line lands in the mask** — on release, each crop is run through the UNet
-   with the stroke itself, the per-crop predictions are merged, clipped to the
-   stroke you drew, thinned and re-widened into a **uniform clean line**. There is
-   no accept step: the line is the result, so it goes into the mask immediately.
-   A stroke you do not want is one `Ctrl+Z` away.
+   the object edge. The stroke is the whole request: it does not matter how fast
+   you drag or how long the stroke is, the server always works on one square
+   around it.
+3. **The line lands in the mask** — on release, the smallest square containing
+   the whole stroke is cut out, run through the UNet once with the stroke itself,
+   then clipped to the stroke you drew, thinned and re-widened into a **uniform
+   clean line**. There is no accept step: the line is the result, so it goes into
+   the mask immediately. A stroke you do not want is one `Ctrl+Z` away.
 4. **Fill** (`F`) — flood the region bounded by the line: hairline gaps up to
    `fill_close` px are bridged, the outside is flooded, holes stay holes, and the
    boundary is refined with a guided filter before `expand` is applied.
@@ -340,38 +341,49 @@ The brush you see and the stroke the model gets are two different widths:
 | **Prompt** (what the model gets) | 12 px | `magic_prompt_ratio` (0.625) of the band, clamped to `[magic_prompt_min, magic_prompt_max]` = [3, 12] |
 
 The band is drawn as a translucent wash with the solid prompt core inside it, and
-the cursor shows both rings. Crops are centred on the prompt, so the model is
+the cursor shows both rings. The window is cut around the prompt, so the model is
 conditioned on exactly the stroke the preview highlights — but a prediction is
 allowed to sit anywhere under the band. That tolerance is what keeps the clean
 line attributable to the stroke: a line that drifts 8 px off the centreline is
 still visibly *your* stroke, while a line 8 px outside a hairline stroke looks
 like it came from nowhere.
 
-The tolerance is enforced, not hoped for. `/api/segment` masks the merged edge
-with the band (inset by half the output line width) before thinning it, so the
-returned line cannot contain a pixel outside the drawn stroke. When the model
-wanders past the band, the line is trimmed and `stats.clipped_px` reports it; the
-UI suggests widening the brush when more than 30 % of the prediction was cut.
+The tolerance is enforced, not hoped for. `/api/segment` masks the edge with the
+band (inset by half the output line width) before thinning it, so the returned
+line cannot contain a pixel outside the drawn stroke. When the model wanders past
+the band, the line is trimmed and `stats.clipped_px` reports it; the UI suggests
+widening the brush when more than 30 % of the prediction was cut.
 
 `magic_prompt_max` defaults to 12 because that is the widest brush the model
 was trained on. Raising it makes the prompt thicker — closer to "the stroke I
 drew is what the model sees" — but pushes the fourth channel out of distribution.
 
-### Crop size follows the image
+### One square, one forward pass
 
-The crop is not a fixed 256. It is `crop_ratio` (0.4) of the canvas short side,
-clamped to `[crop_min, crop_size]` and snapped to a multiple of 32:
+The stroke decides the crop. `/api/segment` takes the bounding box of the painted
+pixels, grows it by half the band on every side, and makes it square:
 
-| Canvas short side | Crop |
-|---|---|
-| 640 (canonical) | 256 |
-| 400 | 160 |
-| 200 | 64 |
-| 4000 (before canonicalising) | 256 |
+```
+side = max(bbox_width, bbox_height) + band_width      →  snapped up to a multiple of 32
+```
 
-That keeps a crop a *local* view of the boundary instead of a picture of the
-whole object, whatever the upload size. The inspector shows the crop size the
-next stroke will use.
+| Stroke | Window | Run at |
+|---|---|---|
+| a 40 px dot | 64 px (floored at `crop_min`) | 64 |
+| a 150 × 100 px arc | 192 px | 192 |
+| an outline spanning 600 px | 640 px | 256 (downscaled 0.4×) |
+
+The window is the *smallest* square that holds the whole stroke, so a short
+stroke is not padded out to the canvas and a long one is not chopped into tiles.
+That means exactly one UNet call per stroke, no seam where two crops disagreed,
+and no merge to average.
+
+Two sizes are reported because they differ for long strokes: `window.size` is the
+square in canvas pixels, `crop_size` is what the network ran at. A window above
+`crop_size` is **downscaled**, never upscaled — 256 px is the only scale the
+model ever saw, and a short stroke blown up would turn its 12 px prompt into a
+30 px blob. Downscaling shrinks the prompt too, which keeps it inside the 3–12 px
+range it was trained on. The inspector shows `640 → 256 px` when that happens.
 
 The canvas always works at the canonical short side (640), even when the stored
 image is 4K, so the object scale at inference matches training.
@@ -390,16 +402,17 @@ warning. Nothing is silently faked.
 | `GET` | `/api/datasets` | datasets with per-split counts |
 | `GET` | `/api/datasets/<ds>/images?split=train` | image names |
 | `GET` | `/media/<ds>/<split>/<im\|gt\|gt_edge\|gt_brush>/<name>` | image bytes |
-| `POST` | `/api/segment` | crops + stroke → predicted line (+ `closed`) |
+| `POST` | `/api/segment` | stroke → predicted line (+ `closed`) |
 | `POST` | `/api/fill` | line in the mask → filled region |
 | `POST` | `/api/mask/save` | save a mask |
 | `POST` | `/api/image/upload` | upload and canonicalise |
 | `POST` | `/api/magic_brush/predict_crops` | reference-client contract, returns an edge mask |
 | `POST` | `/api/magic_brush/predict_single_crop` | single crop, for debugging |
 
-`/api/segment` takes crop **boxes**, not crop images; the server slices them from
-the stored image with replicate padding. That removes a class of base64 alignment
-bugs and cuts the payload roughly 20×.
+`/api/segment` takes the stroke **mask**, not crop images or crop boxes: the
+server reads its bounding box and cuts the window itself. That removes a class of
+base64 alignment bugs, cuts the payload roughly 20×, and means the client cannot
+ask for a window that misses part of the stroke it just drew.
 
 ```json
 // POST /api/segment  ->
@@ -409,10 +422,12 @@ bugs and cuts the payload roughly 20×.
   "mask_base64": null,                          // only in mode="object"
   "edge_base64": "data:image/png;base64,...",   // 1-px skeleton, for debugging
   "closed": true,                               // can this line be filled?
-  "crop_size": 256,
+  "window": { "x0": 24, "y0": 34, "size": 192 },// the square, in canvas px
+  "crop_size": 192,                             // what the network ran at
+  "scale": 1.0,                                 // crop_size / window.size
   "band_width": 32,                             // the stroke the user drew
   "prompt_width": 20,                           // the stroke the model saw
-  "stats": { "num_crops": 9, "ms_infer": 118.2, "ms_post": 21.7, "clipped_px": 0 }
+  "stats": { "num_crops": 1, "ms_infer": 24.1, "ms_post": 21.7, "clipped_px": 0 }
 }
 ```
 
@@ -426,9 +441,8 @@ One flat list, one setting per line. See `config.py` for all of them.
 dataset: demo                 # folder under datasets_dir
 datasets_dir: ./datasets
 short_side: 640               # downscale target
-crop_size: 256                # training crop, and the largest inference crop
-crop_min: 64                  # smallest inference crop
-crop_ratio: 0.4               # inference crop / canvas short side
+crop_size: 256                # training crop, and the largest inference window
+crop_min: 64                  # smallest inference window
 width: 20                     # UNet base channels: 16 / 20 / 24 / 32
 depth: 4
 batch_size: 32
@@ -474,8 +488,11 @@ The architecture is a UNet with depthwise-separable blocks, width 20, depth 4:
 **0.34 M parameters, 1.58 GFLOPs** at 256². Measured on a 16-core CPU with
 `channels_last` and 8 threads: **24 ms/crop** at batch 1.
 
-**Merging** averages overlapping crop predictions, boosts repeatedly brushed
-pixels, thresholds, denoises, and applies morphology.
+**One window per stroke** means there is nothing to merge: the single prediction
+is pasted into a full-canvas probability map at the window's offset, so a stroke
+costs one forward pass instead of a handful. `PredictionMerger` is still the
+paste mechanism (and still serves the reference endpoint), but its averaging and
+brush-boost paths no longer run for the editor.
 
 **Edge → line** is deterministic: threshold, thin to a 1-px skeleton
 (Zhang-Suen), then dilate to `line_width`. Thinning first means the line is
@@ -506,7 +523,7 @@ BAM/
 ├── backend/
 │   ├── app.py           # Flask factory
 │   ├── routes/          # pages, datasets, masks, magic_brush, health
-│   ├── inference/       # predictor, merger, edge_to_mask, registry
+│   ├── inference/       # crop_window, predictor, merger, edge_to_mask, registry
 │   └── services/        # storage, dataset_index, cache
 ├── training/
 │   ├── prepare/         # download, preprocess, dedupe
@@ -516,7 +533,7 @@ BAM/
 │   ├── dataset.py, sampler.py, losses.py, metrics.py
 │   └── train.py, evaluate.py, export_onnx.py
 ├── tools/               # make_demo_subset, verify_alignment, visualize_crops, benchmark_cpu
-├── tests/               # 157 tests
+├── tests/               # 163 tests
 ├── config.py            # the only config: flat dataclass + defaults
 ├── imgio.py             # unicode-safe image IO
 └── run.py
@@ -584,9 +601,10 @@ pytest -q
 python -m pyflakes backend training tools tests config.py imgio.py run.py
 ```
 
-157 tests cover config precedence and crop sizing, edge/brush synthesis
-invariants (the clean edge sits on the boundary and covers the whole perimeter;
-the brush is not the edge), joint-transform alignment, crop-bucket coverage,
-model shapes and checkpoint round-trips, merge arithmetic, the fill algorithm
-(hole preservation, open-line handling, gap bridging), the API contract across
-splits, and path-traversal rejection.
+163 tests cover config precedence, the stroke→window geometry (the square holds
+the whole stroke, is centred on it, never upscales, and is capped at the trained
+crop), edge/brush synthesis invariants (the clean edge sits on the boundary and
+covers the whole perimeter; the brush is not the edge), joint-transform
+alignment, crop-bucket coverage, model shapes and checkpoint round-trips, merge
+arithmetic, the fill algorithm (hole preservation, open-line handling, gap
+bridging), the API contract across splits, and path-traversal rejection.

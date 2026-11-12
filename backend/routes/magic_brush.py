@@ -3,24 +3,31 @@
 The magic brush is a two-step interaction:
 
 1. ``POST /api/segment`` — the user drags a rough stroke along the object edge.
-   The server slices small square crops across that stroke, batches them through
-   the UNet with the stroke itself, merges the per-crop predictions, and returns
-   the predicted **clean line**. Nothing is committed yet: the line replaces the
-   wobbly stroke on screen so the user can judge it, re-stroke, or accept it.
+   The stroke *is* the request: the server takes its bounding box, grows it into
+   the smallest square that holds the whole stroke, runs that one square through
+   the UNet with the stroke itself, and returns the predicted **clean line**.
+   One square, one forward pass — no tiling along the path and nothing to merge.
+   Nothing is committed yet: the line replaces the wobbly stroke on screen so
+   the user can judge it, re-stroke, or accept it.
 
    The stroke arrives in two widths. What the user draws and sees is a *band*;
    what the model is conditioned on is a thinner *prompt* stroke centred in it.
-   The merged edge is clipped to the band before it becomes a line, so the
+   The predicted edge is clipped to the band before it becomes a line, so the
    prediction can only appear under the stroke the user actually drew — a
    prediction that wanders off is trimmed rather than shown somewhere the user
    never brushed.
+
+   A window larger than ``crop_size`` is downscaled to it rather than upsampled
+   by the network: the model only ever saw 256 px crops, and a 600 px square
+   would otherwise be a picture of the whole object. The stroke prompt shrinks
+   with it, which keeps it inside the 3-12 px range it was trained on.
 
 2. ``POST /api/fill`` — once the line is accepted and encloses the object, the
    enclosed region is flooded into a filled mask.
 
 ``/api/magic_brush/predict_crops`` and ``/api/magic_brush/predict_single_crop``
 keep the reference repository's request/response shape for clients that send
-crop images instead of crop boxes. They return the raw edge mask, not a line.
+crop images instead of a stroke. They return the raw edge mask, not a line.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ import numpy as np
 from flask import Blueprint, request
 
 from ..deps import cfg, fail, index, ok, registry
+from ..inference.crop_window import CropWindow, stroke_window
 from ..inference.edge_to_mask import (
     edge_to_mask,
     line_is_closed,
@@ -46,7 +54,6 @@ from ..inference.merger import (
 )
 from ..inference.registry import ModelUnavailable
 from ..schemas import (
-    CropSpec,
     ValidationError,
     parse_fill,
     parse_legacy_crops,
@@ -77,42 +84,27 @@ def _validity(placement: CropPlacement, height: int, width: int) -> np.ndarray:
     return valid
 
 
-def _slice_crops(
-    rgb: np.ndarray, stroke: np.ndarray, crops: list[CropSpec]
-) -> tuple[list[np.ndarray], list[np.ndarray], list[CropPlacement], list[np.ndarray]]:
-    """Slice crops from replicate-padded arrays so edges never get fake black.
+def _window_patch(
+    array: np.ndarray, window: CropWindow, border: int, fill: int = 0
+) -> np.ndarray:
+    """Cut the window out of an array, padding whatever falls outside it.
 
-    The RGB patch and the stroke patch are cut with identical integer offsets,
-    which is what keeps the 4th channel pixel-aligned with the image.
+    A stroke that runs along the frame edge puts part of its square outside the
+    image. The RGB is padded by replicating the border, so the model sees more
+    of the same edge instead of a black wall it would happily predict around;
+    the stroke is padded with zeros, because a stroke that was not drawn there
+    must not become a prompt there.
     """
-    size = crops[0].size
-    half = size // 2
-
-    rgb_padded = cv2.copyMakeBorder(rgb, half, half, half, half, cv2.BORDER_REPLICATE)
-    stroke_padded = cv2.copyMakeBorder(
-        stroke, half, half, half, half, cv2.BORDER_CONSTANT, value=0
-    )
-
-    height, width = rgb.shape[:2]
-    rgb_crops: list[np.ndarray] = []
-    stroke_crops: list[np.ndarray] = []
-    placements: list[CropPlacement] = []
-    valids: list[np.ndarray] = []
-
-    for crop in crops:
-        x = crop.x0 + half
-        y = crop.y0 + half
-        patch = rgb_padded[y : y + size, x : x + size]
-        stroke_patch = stroke_padded[y : y + size, x : x + size]
-        if patch.shape[:2] != (size, size):
-            continue
-        rgb_crops.append(np.ascontiguousarray(patch))
-        stroke_crops.append(np.ascontiguousarray(stroke_patch))
-        placement = CropPlacement(crop.x0, crop.y0, size)
-        placements.append(placement)
-        valids.append(_validity(placement, height, width))
-
-    return rgb_crops, stroke_crops, placements, valids
+    height, width = array.shape[:2]
+    top = max(0, -window.y0)
+    left = max(0, -window.x0)
+    bottom = max(0, window.y0 + window.size - height)
+    right = max(0, window.x0 + window.size - width)
+    if top or left or bottom or right:
+        array = cv2.copyMakeBorder(array, top, bottom, left, right, border, value=fill)
+    x = window.x0 + left
+    y = window.y0 + top
+    return np.ascontiguousarray(array[y : y + window.size, x : x + window.size])
 
 
 def _merge(
@@ -160,13 +152,34 @@ def segment():
     except Exception as exc:
         return fail(f"could not load image: {exc}", 500)
 
-    rgb_crops, stroke_crops, placements, valids = _slice_crops(rgb, req.stroke, req.crops)
-    if not rgb_crops:
-        return fail("no valid crops after clamping", 400)
+    params = req.params
+    try:
+        window = stroke_window(
+            req.stroke,
+            # The window has to hold the band, not just the prompt inside it:
+            # the band is what the user drew, and a window that cuts it would
+            # clip the prediction before it was ever made.
+            pad=max(2, int(round(params["brush_width"] / 2.0))),
+            min_side=cfg().crop_min,
+            max_side=cfg().crop_size,
+        )
+    except ValueError:
+        return fail("stroke_mask is empty — draw a stroke first", 400)
+
+    rgb_patch = _window_patch(rgb, window, cv2.BORDER_REPLICATE)
+    stroke_patch = _window_patch(req.stroke, window, cv2.BORDER_CONSTANT)
+    if window.downscaled:
+        target = (window.model_size, window.model_size)
+        rgb_patch = cv2.resize(rgb_patch, target, interpolation=cv2.INTER_AREA)
+        stroke_patch = cv2.resize(stroke_patch, target, interpolation=cv2.INTER_AREA)
+        # Keep every pixel the stroke touched: a 3 px prompt shrunk six times
+        # survives as partial coverage, and thresholding that away would delete
+        # the prompt the whole prediction is conditioned on.
+        stroke_patch = ((stroke_patch > 0).astype(np.uint8)) * 255
 
     started = time.perf_counter()
     try:
-        probabilities = registry().predict(rgb_crops, stroke_crops)
+        probabilities = registry().predict([rgb_patch], [stroke_patch])
     except ModelUnavailable as exc:
         return fail(str(exc), 503)
     except Exception as exc:
@@ -174,9 +187,23 @@ def segment():
     infer_ms = (time.perf_counter() - started) * 1000.0
 
     post_started = time.perf_counter()
-    params = req.params
+    probability = probabilities[0]
+    if probability.ndim == 3:
+        probability = probability[0]
+    if window.downscaled:
+        probability = cv2.resize(
+            probability, (window.size, window.size), interpolation=cv2.INTER_LINEAR
+        )
+
+    height, width = rgb.shape[:2]
+    placement = CropPlacement(window.x0, window.y0, window.size)
     merger = _merge(
-        placements, probabilities, valids, rgb.shape[0], rgb.shape[1], params
+        [placement],
+        [probability],
+        [_validity(placement, height, width)],
+        height,
+        width,
+        params,
     )
     merged = merger.finalize(
         threshold=params["threshold"],
@@ -236,18 +263,20 @@ def segment():
         confidence=fill.confidence,
         low_confidence=bool(fill.low_confidence),
         mode_used=fill.mode,
-        crop_size=int(req.crops[0].size),
+        crop_size=window.model_size,
+        window={"x0": window.x0, "y0": window.y0, "size": window.size},
+        scale=round(window.scale, 4),
         band_width=params["brush_width"],
         prompt_width=params["prompt_width"],
         canvas={"width": req.canvas_width, "height": req.canvas_height},
         stats={
-            "num_crops": len(rgb_crops),
-            "requested_crops": len(req.crops),
+            "num_crops": 1,
+            "window_px": window.size,
             "ms_infer": round(infer_ms, 1),
             "ms_post": round(post_ms, 1),
             "ms_total": round(infer_ms + post_ms, 1),
             "backend": registry().meta.get("backend", "unknown"),
-            "coverage": round(merged.covered / max(1, rgb.shape[0] * rgb.shape[1]), 4),
+            "coverage": round(merged.covered / max(1, height * width), 4),
             "predicted_px": int(predicted.sum()),
             "clipped_px": clipped,
         },

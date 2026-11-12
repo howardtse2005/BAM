@@ -221,14 +221,20 @@ export class UI {
     const zoom = Math.round(status.zoom * 100);
     const crops = status.crops;
     if (el("s-zoom")) el("s-zoom").textContent = `${zoom}%`;
-    // Keep the last meaningful crop count: the collector resets after a stroke,
-    // and "0 crops" is less useful than "the last stroke used 9".
+    // The window is derived from the last stroke and only reported after the
+    // server answers, so keep the last one instead of blanking the row.
     if (crops > 0) {
       if (el("s-crops")) el("s-crops").textContent = `${crops} crop${crops === 1 ? "" : "s"}`;
       if (el("i-crops")) el("i-crops").textContent = String(crops);
     }
     if (el("i-crop-size") && status.cropSize) {
-      el("i-crop-size").textContent = `${status.cropSize} px`;
+      // A long stroke needs a window larger than the trained crop, so it is
+      // downscaled; showing both sizes explains the arrow instead of hiding it.
+      const window = status.windowSize;
+      el("i-crop-size").textContent =
+        window && window !== status.cropSize
+          ? `${window} → ${status.cropSize} px`
+          : `${status.cropSize} px`;
     }
     if (el("i-band") && status.brushWidth) {
       el("i-band").textContent = `${status.brushWidth} / ${status.promptWidth} px`;

@@ -29,10 +29,6 @@ def _loop(gt: np.ndarray, thickness: int = 9, fraction: float = 1.0) -> np.ndarr
     return line
 
 
-def _crop_size(app, height: int, width: int) -> int:
-    return app.config["BAM"].crop_for(height, width)
-
-
 def _segment_payload(app, dataset="toy", split="train", name=None, extra_params=None):
     index = app.extensions["bam_index"]
     name = name or index.list_images(dataset, split)[0]
@@ -40,21 +36,6 @@ def _segment_payload(app, dataset="toy", split="train", name=None, extra_params=
     height, width = gt.shape
 
     stroke = _loop(gt)
-    size = _crop_size(app, height, width)
-    stride = max(16, size // 2)
-
-    boxes = []
-    last = None
-    for path in mask_to_paths(gt):
-        points = resample_polyline(np.vstack([path, path[:1]]), 8)
-        for x, y in points:
-            if last is None or np.hypot(x - last[0], y - last[1]) >= stride:
-                half = size // 2
-                boxes.append(
-                    {"x0": int(round(x - half)), "y0": int(round(y - half)), "size": size}
-                )
-                last = (x, y)
-
     params = {"mode": "line", "smooth": 2, "expand": 0}
     params.update(extra_params or {})
     return {
@@ -62,7 +43,6 @@ def _segment_payload(app, dataset="toy", split="train", name=None, extra_params=
         "split": split,
         "image": name,
         "canvas": {"width": width, "height": height},
-        "crops": boxes[:64],
         "stroke_mask": _encode(stroke),
         "params": params,
     }, gt
@@ -73,6 +53,15 @@ def test_health(client):
     assert data["status"] == "ok"
     assert data["model"]["available"] is True
     assert data["model"]["is_mock"] is True
+
+
+def test_editor_page_renders(client):
+    """The editor opens empty; nothing in the page sizes a crop for it."""
+    response = client.get("/")
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert "BAM_BOOTSTRAP" in body
+    assert "cropStride" not in body
 
 
 def test_list_datasets_reports_splits(client):
@@ -119,14 +108,87 @@ def test_segment_returns_a_line_not_a_region(client, app):
     assert data["status"] == "success"
     assert data["mode_used"] == "line"
     assert data["mask_base64"] is None
-    assert data["stats"]["num_crops"] > 0
-    assert data["crop_size"] == _crop_size(app, *gt.shape)
+    # One stroke, one square, one forward pass.
+    assert data["stats"]["num_crops"] == 1
+    assert data["crop_size"] % 32 == 0
+    assert app.config["BAM"].crop_min <= data["crop_size"] <= app.config["BAM"].crop_size
 
     line = _decode(data["line_base64"])
     assert line.shape == gt.shape
     # A line, not a blob: far fewer pixels than the object it traces.
     assert (line > 127).sum() < (gt > 127).sum()
     assert (line > 127).sum() > 0
+
+
+def test_segment_crops_one_square_around_the_whole_stroke(client, app):
+    """The window is the smallest square that holds every painted pixel."""
+    from backend.inference.crop_window import snap_up
+
+    payload, _ = _segment_payload(app)
+    data = client.post("/api/segment", json=payload).get_json()
+
+    stroke = _decode(payload["stroke_mask"]) > 127
+    ys, xs = np.nonzero(stroke)
+    window = data["window"]
+    x0, y0, size = window["x0"], window["y0"], window["size"]
+
+    assert data["stats"]["window_px"] == size
+    assert x0 <= xs.min() and x0 + size > xs.max()
+    assert y0 <= ys.min() and y0 + size > ys.max()
+
+    cfg = app.config["BAM"]
+    pad = max(2, round(cfg.magic_brush_width / 2))
+    extent = max(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1)
+    assert size == max(snap_up(extent + 2 * pad), cfg.crop_min)
+
+
+def test_segment_runs_a_short_stroke_at_native_scale(client, app):
+    payload, gt = _segment_payload(app)
+    height, width = gt.shape
+    stroke = np.zeros_like(gt)
+    cv2.circle(stroke, (width // 2, height // 2), 40, 255, 9)
+    payload["stroke_mask"] = _encode(stroke)
+
+    data = client.post("/api/segment", json=payload).get_json()
+    assert data["scale"] == 1.0
+    assert data["crop_size"] == data["window"]["size"]
+
+
+def test_segment_downscales_a_window_larger_than_the_trained_crop(client, app):
+    """A stroke spanning the canvas is still one window, shrunk to fit."""
+    payload, gt = _segment_payload(app)
+    height, width = gt.shape
+    long_stroke = np.zeros_like(gt)
+    cv2.line(long_stroke, (2, 2), (width - 3, height - 3), 255, 9)
+    payload["stroke_mask"] = _encode(long_stroke)
+
+    data = client.post("/api/segment", json=payload).get_json()
+    cfg = app.config["BAM"]
+    assert data["stats"]["num_crops"] == 1
+    assert data["window"]["size"] > cfg.crop_size
+    assert data["crop_size"] == cfg.crop_size
+    assert 0.0 < data["scale"] < 1.0
+
+    # Shrinking the window must not lose the prompt: the line still lands on
+    # the stroke that produced it.
+    line = _decode(data["line_base64"]) > 127
+    stroke = _decode(payload["stroke_mask"]) > 127
+    assert line.any()
+    dist = cv2.distanceTransform(255 - stroke.astype(np.uint8) * 255, cv2.DIST_L2, 5)
+    assert float(np.median(dist[line])) <= 3.0
+
+
+def test_segment_handles_a_stroke_on_the_frame_edge(client, app):
+    """A window that hangs off the canvas is padded, not rejected."""
+    payload, gt = _segment_payload(app)
+    height, width = gt.shape
+    edge_stroke = np.zeros_like(gt)
+    cv2.line(edge_stroke, (0, 0), (0, height - 1), 255, 9)
+    payload["stroke_mask"] = _encode(edge_stroke)
+
+    response = client.post("/api/segment", json=payload)
+    assert response.status_code == 200
+    assert response.get_json()["window"]["x0"] < 0
 
 
 def test_segment_line_sits_on_the_object_boundary(client, app):
@@ -192,12 +254,12 @@ def test_segment_rejects_bad_split(client, app):
     assert response.status_code == 400
 
 
-def test_segment_rejects_too_many_crops(client, app):
-    payload, _ = _segment_payload(app)
-    template = payload["crops"][0]
-    payload["crops"] = [dict(template) for _ in range(65)]
+def test_segment_rejects_an_empty_stroke(client, app):
+    payload, gt = _segment_payload(app)
+    payload["stroke_mask"] = _encode(np.zeros_like(gt))
     response = client.post("/api/segment", json=payload)
     assert response.status_code == 400
+    assert "stroke" in response.get_json()["message"]
 
 
 def test_segment_unknown_image(client, app):
@@ -205,35 +267,6 @@ def test_segment_unknown_image(client, app):
     payload["image"] = "does-not-exist"
     response = client.post("/api/segment", json=payload)
     assert response.status_code == 404
-
-
-@pytest.mark.parametrize("size", [100, 512])
-def test_segment_rejects_out_of_range_crop_size(client, app, size):
-    payload, _ = _segment_payload(app)
-    payload["crops"][0]["size"] = size
-    response = client.post("/api/segment", json=payload)
-    assert response.status_code == 400
-
-
-def test_segment_rejects_mixed_crop_sizes(client, app):
-    payload, _ = _segment_payload(app)
-    payload["crops"][0]["size"] = payload["crops"][0]["size"] - 32
-    response = client.post("/api/segment", json=payload)
-    assert response.status_code == 400
-
-
-def test_segment_accepts_a_smaller_crop(client, app):
-    """Crop size follows the canvas, so it is not pinned to crop_size."""
-    payload, gt = _segment_payload(app)
-    small = 64
-    half = small // 2
-    height, width = gt.shape
-    payload["crops"] = [
-        {"x0": width // 2 - half, "y0": height // 2 - half, "size": small}
-    ]
-    response = client.post("/api/segment", json=payload)
-    assert response.status_code == 200
-    assert response.get_json()["crop_size"] == small
 
 
 # --------------------------------------------------------------------------- #
@@ -438,7 +471,7 @@ def test_reference_predict_crops(client, app):
     rgb = index.load_rgb("toy", "train", name)
     gt = index.load_mask("toy", "train", name)
     height, width = gt.shape
-    size = _crop_size(app, height, width)
+    size = 128  # the reference client sends its own patches; any legal size works
 
     crops = []
     for i in range(3):
@@ -493,8 +526,6 @@ def test_config_endpoint(client, app):
     cfg = app.config["BAM"]
     assert data["crop_size"] == 256
     assert data["crop_min"] == 64
-    assert data["crop_ratio"] == 0.4
-    assert data["crop_stride"] == 128
     assert data["magic_brush_width"] == cfg.magic_brush_width
     assert data["params"]["brush_width"] == cfg.magic_brush_width
     assert data["params"]["prompt_width"] == cfg.prompt_width_for()

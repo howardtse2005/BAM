@@ -24,20 +24,12 @@ class ValidationError(ValueError):
 
 
 @dataclass
-class CropSpec:
-    x0: int
-    y0: int
-    size: int
-
-
-@dataclass
 class SegmentRequest:
     dataset: str
     split: str
     image: str
     canvas_width: int
     canvas_height: int
-    crops: list[CropSpec]
     stroke: np.ndarray
     params: dict[str, Any] = field(default_factory=dict)
 
@@ -149,24 +141,14 @@ def parse_params(raw: dict | None, cfg) -> dict[str, Any]:
     }
 
 
-def _parse_crop_size(raw: Any, cfg) -> int:
-    """Validate an inference crop size.
-
-    The crop is not fixed at 256: the client picks it from the canvas size so a
-    crop always covers the same fraction of the object. It must stay a multiple
-    of 32 (four pooling stages) and inside ``[crop_min, crop_size]``.
-    """
-    size = int(_clamp(raw, 32, 512, cfg.crop_size))
-    if size % 32 != 0:
-        raise ValidationError(f"crop size must be a multiple of 32, got {size}")
-    if not cfg.crop_min <= size <= cfg.crop_size:
-        raise ValidationError(
-            f"crop size must be in [{cfg.crop_min}, {cfg.crop_size}], got {size}"
-        )
-    return size
-
-
 def parse_segment(payload: dict, cfg) -> SegmentRequest:
+    """Parse the body of ``/api/segment``: the stroke, and nothing else.
+
+    The crop is not a client decision any more. The stroke is the prompt, so the
+    server derives the single square that contains it (see
+    ``backend.inference.crop_window``) -- which also means a client cannot ask
+    for a window that misses part of the stroke it just drew.
+    """
     if not isinstance(payload, dict):
         raise ValidationError("body must be a JSON object")
 
@@ -181,29 +163,6 @@ def parse_segment(payload: dict, cfg) -> SegmentRequest:
     height = int(_clamp(canvas.get("height", 0), 1, cfg.max_canvas_side, 0))
     if width <= 0 or height <= 0:
         raise ValidationError("canvas dimensions are required")
-
-    raw_crops = payload.get("crops")
-    if not isinstance(raw_crops, list) or not raw_crops:
-        raise ValidationError("crops must be a non-empty list")
-    if len(raw_crops) > cfg.max_crops:
-        raise ValidationError(f"too many crops (max {cfg.max_crops})")
-
-    crops: list[CropSpec] = []
-    for item in raw_crops:
-        if not isinstance(item, dict):
-            raise ValidationError("each crop must be an object")
-        size = _parse_crop_size(item.get("size", cfg.crop_size), cfg)
-        crops.append(
-            CropSpec(
-                x0=int(_clamp(item.get("x0", 0), -4096, 4096, 0)),
-                y0=int(_clamp(item.get("y0", 0), -4096, 4096, 0)),
-                size=size,
-            )
-        )
-
-    sizes = {crop.size for crop in crops}
-    if len(sizes) != 1:
-        raise ValidationError("all crops must share one size")
 
     stroke_b64 = payload.get("stroke_mask")
     if not isinstance(stroke_b64, str) or not stroke_b64:
@@ -222,7 +181,6 @@ def parse_segment(payload: dict, cfg) -> SegmentRequest:
         image=image,
         canvas_width=width,
         canvas_height=height,
-        crops=crops,
         stroke=stroke,
         params=parse_params(payload.get("params"), cfg),
     )
@@ -349,7 +307,6 @@ def pseudo_stroke(rgb: np.ndarray) -> np.ndarray:
 
 __all__ = [
     "ValidationError",
-    "CropSpec",
     "SegmentRequest",
     "FillRequest",
     "LegacyCrop",
