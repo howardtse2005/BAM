@@ -10,7 +10,7 @@ from ..services.storage import StorageError
 
 bp = Blueprint("datasets_api", __name__)
 
-MEDIA_SUBDIRS = {"im", "gt", "gt_edge"}
+MEDIA_SUBDIRS = {"im", "gt", "gt_edge", "gt_brush"}
 
 
 @bp.get("/api/datasets")

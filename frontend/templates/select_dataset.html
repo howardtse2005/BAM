@@ -13,7 +13,7 @@
       </span>
       <div>
         <h1>BAM</h1>
-        <p>Brush Anything Model — stroke-guided edge segmentation</p>
+        <p>Brush Anything Model — brush-guided edge refinement</p>
       </div>
     </div>
     <div class="picker__status">
@@ -52,6 +52,7 @@
           <div class="dataset-card__tags">
             {% if ds.has_gt %}<span class="tag">GT</span>{% endif %}
             {% if ds.has_edge %}<span class="tag">edge</span>{% endif %}
+            {% if ds.has_brush %}<span class="tag">brush</span>{% endif %}
           </div>
         </a>
       </li>
@@ -60,9 +61,9 @@
     {% else %}
     <div class="empty">
       <h3>No datasets yet</h3>
-      <p>Create <code>datasets/&lt;name&gt;/rgb/</code> and drop images in, or generate the demo set:</p>
+      <p>Put image/mask pairs under <code>datasets/&lt;name&gt;/{train,val,test}/{im,gt}/</code>, or generate the demo set:</p>
       <pre><code>python tools/make_demo_subset.py
-python -m training.prepare.normalize --name demo --source datasets/_raw/demo</code></pre>
+python -m training.prepare.preprocess --dataset datasets/_raw/demo --out datasets/demo</code></pre>
       <p class="muted">Dataset root: <code>{{ dataset_root }}</code></p>
     </div>
     {% endif %}

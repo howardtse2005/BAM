@@ -1,11 +1,13 @@
 # BAM — Brush Anything Model
 
-Stroke-guided edge segmentation for any object. You draw a rough line along the boundary; a small 4-channel UNet (RGB + stroke) snaps it to the true edge, and a deterministic post-process turns that edge into a filled mask.
+Brush-guided edge refinement for any object. You drag a rough stroke along a
+boundary; a small 4-channel UNet (RGB + brush) snaps it onto the true edge and
+returns a clean line; a deterministic fill turns that line into a mask.
 
 Runs on CPU. No GPU required at inference.
 
 ```
-stroke → 256×256 crops → UNet (0.34M params) → merge → edge → fill → mask
+brush → crops → UNet (0.34 M params) → merge → clean line → accept → fill → mask
 ```
 
 ---
@@ -14,15 +16,14 @@ stroke → 256×256 crops → UNet (0.34M params) → merge → edge → fill �
 
 | # | Step | Command | Produces |
 |---|---|---|---|
-| 1 | Create `gt_edge/` | (same command as step 2) | a synthetic user stroke per mask |
-| 2 | Preprocess | `python -m training.prepare.preprocess --dataset datasets/<name>` | downscaled `im/`, `gt/`, `gt_edge/` |
+| 1 | Generate the rasters | (same command as step 2) | `gt_edge/` and `gt_brush/` per mask |
+| 2 | Preprocess | `python -m training.prepare.preprocess --dataset datasets/<name>` | downscaled `im/`, `gt/`, `gt_edge/`, `gt_brush/` |
 | 3 | Train and validate | `python -m training.train` | `model/bam_v1.pth` |
 | 4 | Deploy | `python run.py` | the web app on `:8000` |
 
-Steps 1 and 2 are one command because the stroke has to be generated at the final
-resolution — you cannot create `gt_edge/` before the mask has been downscaled.
-They are described separately below because they produce different artifacts and
-have different knobs.
+Steps 1 and 2 are one command because both rasters have to be generated at the
+final resolution — a stroke drawn at 4K and then shrunk loses exactly the
+sub-pixel wobble the model is supposed to correct.
 
 ---
 
@@ -41,8 +42,8 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 ## Dataset layout
 
-Every dataset is a folder with three splits. Each split has `im/` (images) and
-`gt/` (binary masks). `gt_edge/` is generated, never authored by hand.
+Every dataset is a folder with three splits. Each split has `im/` (images),
+`gt/` (binary masks), and two generated rasters: `gt_edge/` and `gt_brush/`.
 
 ```
 datasets/
@@ -50,11 +51,12 @@ datasets/
     ├── train/
     │   ├── im/        0001.jpg  0002.jpg ...
     │   ├── gt/        0001.png  0002.png ...
-    │   └── gt_edge/   0001.png  0002.png ...   <- created by step 1
+    │   ├── gt_edge/   0001.png  0002.png ...   <- the clean line to predict
+    │   └── gt_brush/  0001.png  0002.png ...   <- the rough stroke to consume
     ├── val/
-    │   ├── im/  gt/  gt_edge/
+    │   ├── im/  gt/  gt_edge/  gt_brush/
     ├── test/
-    │   ├── im/  gt/  gt_edge/
+    │   ├── im/  gt/  gt_edge/  gt_brush/
     └── meta.json                                <- written by step 2
 ```
 
@@ -66,37 +68,75 @@ Rules:
 - The split is whatever you put in `train/`, `val/` and `test/`. There is no
   manifest and no automatic splitting.
 - Masks must be single-channel, with the object at 255 and the background at 0.
+- `gt_edge/` and `gt_brush/` are never authored by hand. Either may be missing;
+  the trainer regenerates what it needs from `gt/`.
 
 ---
 
-## Step 1 — Create `gt_edge/`
+## The two rasters
 
-`gt_edge/` is the **synthetic user stroke**: a raster that looks like a person
-dragging a brush roughly along the boundary. It is the model's 4th input channel,
-and it is what makes the task learnable — without it the network would have to
-find the boundary from scratch.
+Both are produced from the same mask by `training/stroke_synth.py`, from the same
+contour walk and the same rasteriser. The difference is what is removed.
 
-It is generated from each mask by `training/stroke_synth.py`:
+### `gt_edge` — the clean line
+
+The target. Full perimeter coverage, no simplification, no smoothing, no
+normal-direction displacement, constant radius. Deterministic: the same mask
+always yields the same raster, which is what makes it usable as a target.
+
+```python
+from training.stroke_synth import clean_edge
+edge = clean_edge(mask)        # uint8, 0/255
+```
+
+### `gt_brush` — the rough stroke
+
+The input. What a person dragging a brush along a boundary produces. Every
+contour is stroked end to end, so the brush covers the same boundary as
+`gt_edge` — it is just imprecise:
 
 1. **Contour extraction** — ordered contours from `cv2.findContours`, holes included.
-2. **Simplification** — RDP with `stroke_simplify` epsilon (2–10 px). People cut corners.
-3. **Smoothing** — a Hann window of `stroke_smooth` (5–21 px).
+2. **Simplification** — RDP with `brush_simplify` epsilon (2–10 px). People cut corners.
+3. **Smoothing** — a Hann window of `brush_smooth` (5–21 px).
 4. **Deformation** — displacement along the local normal: a global offset
-   (`stroke_jitter`, σ≈3 px), two sinusoids (`stroke_wobble_amp`,
-   `stroke_wobble_len`), and fractal noise. Clipped to `stroke_max_offset` (12 px).
-5. **Coverage** — 1–3 arcs covering `stroke_coverage` (45–100%) of the perimeter.
-   15% of samples get only a short scribble.
-6. **Rasterisation** — anti-aliased brush of radius `stroke_radius_min..max`
-   (1.5–6 px), with occasional dry-brush gaps.
-7. **Mistakes** — 15% distractor stroke along a strong non-object gradient, 5%
-   interior scribble, 8% no stroke at all.
+   (`brush_jitter`, σ≈3 px), two sinusoids (`brush_wobble_amp`,
+   `brush_wobble_len`), and fractal noise. Clipped to `brush_max_offset` (12 px).
+5. **Coverage** — the full perimeter, `brush_coverage` (100%). Every contour gets
+   its own ring, so holes are outlined too.
+6. **Rasterisation** — anti-aliased brush of radius `brush_radius_min..max`
+   (1.5–6 px), so the stroke is several pixels wide and its width varies.
 
-Where it is used:
+```python
+from training.stroke_synth import synthesize_brush
+brush = synthesize_brush(mask, rgb=rgb, rng=0)   # uint8, 0/255
+```
 
-| Split | Stroke source | Why |
+Coverage is deliberately not partial. A brush that stopped halfway would leave
+the 4th channel describing one part of the object and the target describing all
+of it, and the model would be asked to invent the rest. `verify_alignment`
+measures this directly: **`edge-covered-by-brush` ≈ 1.0** means every pixel of
+the target has brush nearby.
+
+The stroke is still rough enough to be a real task: it is displaced by up to
+12 px, its radius varies from 1.5 to 6 px, and only ~30% of its own pixels land
+on the edge (**`brush-on-edge`**). Copying the input channel therefore scores
+badly.
+
+The knobs that *would* break alignment — `brush_coverage` below 1, `p_partial`,
+`p_two_arcs`, `p_no_brush`, `p_distractor`, `p_interior`, `p_dry_brush` — all
+default to off. Set them if you want to train a model that also copes with
+half-drawn strokes.
+
+### Where each one is used
+
+| Split | Brush source | Why |
 |---|---|---|
 | `train` | regenerated every sample | unbounded augmentation; the model never sees the same stroke twice |
-| `val`, `test` | the stored `gt_edge/*.png` | evaluation must be reproducible |
+| `val`, `test` | the stored `gt_brush/*.png` | evaluation must be reproducible |
+
+The edge target is always rebuilt from the crop's own mask, so it stays
+pixel-aligned through flips, rotations and rescaling. `tools/verify_alignment.py`
+checks that the stored `gt_edge/` agrees with it.
 
 To inspect what the model will actually see:
 
@@ -105,9 +145,11 @@ python tools/visualize_crops.py --split train --count 6
 # writes datasets/_qa/crops/crops_train.jpg
 ```
 
+Each row is `[ rgb crop ] [ brush channel ] [ edge target over rgb ]`.
+
 ---
 
-## Step 2 — Preprocess (downscale, validate, create `gt_edge/`)
+## Step 2 — Preprocess (downscale, validate, generate both rasters)
 
 ```bash
 python -m training.prepare.preprocess --dataset datasets/DIS5K
@@ -117,7 +159,7 @@ By default the output is a **sibling** folder, so a 4K source is never modified:
 
 ```
 datasets/DIS5K            (source, untouched)
-datasets/DIS5K_prepared   (output: canonical size + gt_edge)
+datasets/DIS5K_prepared   (output: canonical size + gt_edge + gt_brush)
 ```
 
 Then point the config at it:
@@ -134,10 +176,13 @@ What the command does, per split:
 3. **Downscales** image and mask so the short side is `short_side` (640). Both are
    resized from the same dimensions, so they cannot drift apart. Images already
    smaller than 640 are left alone — never upscaled.
-4. **Writes `gt_edge/`** at the final resolution, seed 0.
-5. **Writes `meta.json`** with per-split counts and rejection reasons.
+4. **Writes `gt_edge/`** — the clean line, no RNG involved.
+5. **Writes `gt_brush/`** — one synthetic brush stroke per mask, seed 0, so the
+   validation set is reproducible.
+6. **Writes `meta.json`** with per-split counts, rejection reasons and how many
+   rasters were written.
 
-**Cropping is not a preprocessing step.** The 256×256 crop is sampled on the fly
+**Cropping is not a preprocessing step.** The training crop is sampled on the fly
 during training, and the sampler deliberately varies position, scale and content
 (boundary-centred, near-boundary, empty, cluttered). A 640×640 image would yield
 dozens of overlapping crops; materialising them would multiply disk usage and
@@ -151,8 +196,9 @@ Useful flags:
 --backup                    # copy im/gt to _original/ before an in-place run
 --dry-run                   # report only
 --limit 500                 # first N images per split
---force                     # regenerate existing gt_edge
---no-edge                   # skip stroke generation
+--force                     # regenerate existing gt_edge and gt_brush
+--no-edge                   # skip gt_edge
+--no-brush                  # skip gt_brush
 ```
 
 ### Verify before training
@@ -162,16 +208,22 @@ python tools/verify_alignment.py --dataset datasets/DIS5K_prepared
 ```
 
 ```
-train  3000 images | shape 0 | non-binary 0 | oversized 0 | no-edge 0 | stroke-near-boundary 0.968
-val     470 images | shape 0 | non-binary 0 | oversized 0 | no-edge 0 | stroke-near-boundary 0.931
-test   2000 images | shape 0 | non-binary 0 | oversized 0 | no-edge 0 | stroke-near-boundary 0.980
+train   2998 images | shape 0 | non-binary 0 | oversized 0 | no-edge 0 | no-brush 0 | edge-on-boundary 1.000 | edge-covered-by-brush 0.970 | brush-on-edge 0.297
+val      470 images | shape 0 | non-binary 0 | oversized 0 | no-edge 0 | no-brush 0 | edge-on-boundary 1.000 | edge-covered-by-brush 0.972 | brush-on-edge 0.310
+test    1999 images | shape 0 | non-binary 0 | oversized 0 | no-edge 0 | no-brush 0 | edge-on-boundary 1.000 | edge-covered-by-brush 0.970 | brush-on-edge 0.310
 ```
 
-`shape` and `non-binary` must be 0. `oversized` means the split was not
-preprocessed. `stroke-near-boundary` is the fraction of stroke pixels within
-20 px of the mask boundary — below ~0.75 means the generator is misconfigured.
+| Column | Must be | Meaning |
+|---|---|---|
+| `shape` | 0 | image, mask and both rasters share dimensions |
+| `non-binary` | 0 | masks are strictly {0, 255} |
+| `oversized` | 0 | the split was preprocessed |
+| `edge-on-boundary` | 1.000 | every `gt_edge` pixel is on the mask boundary |
+| `edge-covered-by-brush` | ≈ 1.0 | every `gt_edge` pixel has a brush pixel within 8 px — the brush spans the whole edge |
+| `brush-on-edge` | < 0.6 | the share of brush pixels that land on the edge — the stroke is rough, not a copy |
 
-A contact sheet lands in `datasets/_qa/alignment/alignment_<split>.jpg`.
+A contact sheet lands in `datasets/_qa/alignment/alignment_<split>.jpg`:
+green = clean edge, orange = brush, blue = mask contour.
 
 ---
 
@@ -202,7 +254,8 @@ Each epoch reports:
 ```
 
 `val_bf` is boundary F-measure with a 2 px tolerance — the metric that matters,
-because the product needs the edge in the right place, not merely a plausible mask.
+because the product needs the line in the right place, not merely a plausible
+mask.
 
 Validation crops are always boundary-centred. Training crops use the four-way
 mixture in `config.yaml` (`mix_boundary`, `mix_near`, `mix_empty`, `mix_dense`);
@@ -245,19 +298,50 @@ python run.py
 python run.py --host 0.0.0.0 --serve waitress    # LAN / production
 ```
 
-What you get:
+### The magic brush
 
 1. **Dataset picker** — every folder under `datasets/` with split counts and a thumbnail.
 2. **Editor** — left tool rail, centre canvas, right inspector, status bar.
-   - `B` brush, `E` eraser, `M` magic pen, `F` fill holes, `Space` pan
-   - `[` / `]` brush size, `+` / `-` zoom, `0` fit, `Tab` mask, `Shift+Tab` edge
-   - split selector in the top bar (`train` / `val` / `test`)
-3. **Magic pen** — draw a rough loop, release, get a filled mask. `Alt`+drag subtracts.
-4. **Save** — writes `<dataset>/<split>/gt/<name>.png` at the image's native size.
+3. **Draw** — pick the magic brush (`M`) and drag *roughly* along the object edge.
+   Crops are collected along the stroke by arc length, so a fast flick and a slow
+   drag cover the boundary equally well.
+4. **Review** — on release, each crop is run through the UNet together with the
+   stroke itself, the per-crop predictions are merged, and the result is thinned
+   and re-widened into a **uniform clean line**. The line replaces the wobbly
+   stroke on screen; nothing is committed yet.
+5. **Decide** — the action bar offers:
+   - **Accept** (`Enter`) — the line becomes the mask.
+   - **Fill** — accept and immediately segment the enclosed region.
+   - **Re-stroke** (`Esc`) — discard the line and draw again.
+
+   `Fill` is disabled while the line is open, because an open line has no
+   interior to fill. Accepting it as a line is still allowed — a traced edge is
+   useful on its own for thin structures.
+6. **Fill** (`F`) — flood the region bounded by the line: hairline gaps up to
+   `fill_close` px are bridged, the outside is flooded, holes stay holes, and the
+   boundary is refined with a guided filter before `expand` is applied.
+7. **Save** — writes `<dataset>/<split>/gt/<name>.png` at the image's native size.
+
+`Alt`+drag subtracts instead of adding. `Ctrl+Z` undoes, including a fill.
+
+### Crop size follows the image
+
+The crop is not a fixed 256. It is `crop_ratio` (0.4) of the canvas short side,
+clamped to `[crop_min, crop_size]` and snapped to a multiple of 32:
+
+| Canvas short side | Crop |
+|---|---|
+| 640 (canonical) | 256 |
+| 400 | 160 |
+| 200 | 64 |
+| 4000 (before canonicalising) | 256 |
+
+That keeps a crop a *local* view of the boundary instead of a picture of the
+whole object, whatever the upload size. The inspector shows the crop size the
+next stroke will use.
 
 The canvas always works at the canonical short side (640), even when the stored
-image is 4K. That keeps the object scale identical to training and bounds CPU cost
-regardless of the source resolution.
+image is 4K, so the object scale at inference matches training.
 
 **It starts without a checkpoint.** With no `model/bam_v1.pth`, the registry falls
 back to a mock backend that predicts a band around your stroke, so the whole path
@@ -269,17 +353,33 @@ warning. Nothing is silently faked.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/health` | status, backend, device, data tier |
+| `GET` | `/api/config` | crop bounds, line width, fill tolerance |
 | `GET` | `/api/datasets` | datasets with per-split counts |
 | `GET` | `/api/datasets/<ds>/images?split=train` | image names |
-| `GET` | `/media/<ds>/<split>/<im\|gt\|gt_edge>/<name>` | image bytes |
-| `POST` | `/api/segment` | crops + stroke → mask + edge |
+| `GET` | `/media/<ds>/<split>/<im\|gt\|gt_edge\|gt_brush>/<name>` | image bytes |
+| `POST` | `/api/segment` | crops + stroke → predicted line (+ `closed`) |
+| `POST` | `/api/fill` | accepted line → filled region |
 | `POST` | `/api/mask/save` | save a mask |
 | `POST` | `/api/image/upload` | upload and canonicalise |
-| `POST` | `/magic_pen/predict_crops` | masker-compatible, returns an edge mask |
+| `POST` | `/api/magic_brush/predict_crops` | reference-client contract, returns an edge mask |
+| `POST` | `/api/magic_brush/predict_single_crop` | single crop, for debugging |
 
 `/api/segment` takes crop **boxes**, not crop images; the server slices them from
 the stored image with replicate padding. That removes a class of base64 alignment
 bugs and cuts the payload roughly 20×.
+
+```json
+// POST /api/segment  ->
+{
+  "status": "success",
+  "line_base64": "data:image/png;base64,...",   // the predicted clean line
+  "mask_base64": null,                          // only in mode="object"
+  "edge_base64": "data:image/png;base64,...",   // 1-px skeleton, for debugging
+  "closed": true,                               // can this line be filled?
+  "crop_size": 256,
+  "stats": { "num_crops": 9, "ms_infer": 118.2, "ms_post": 21.7 }
+}
+```
 
 ---
 
@@ -291,12 +391,17 @@ One flat list, one setting per line. See `config.py` for all of them.
 dataset: demo                 # folder under datasets_dir
 datasets_dir: ./datasets
 short_side: 640               # downscale target
-crop_size: 256
+crop_size: 256                # training crop, and the largest inference crop
+crop_min: 64                  # smallest inference crop
+crop_ratio: 0.4               # inference crop / canvas short side
 width: 20                     # UNet base channels: 16 / 20 / 24 / 32
 depth: 4
 batch_size: 32
 epochs: 60
 lr: 0.0003
+mode: line                    # line = predict the edge, object = also fill
+line_width: 3                 # predicted line thickness, canvas px
+fill_close: 5                 # px of gap bridged before filling
 train_device: auto
 infer_device: cpu
 backend: auto
@@ -315,30 +420,37 @@ Resolution order: CLI > environment > `config.yaml` > defaults.
 
 ## How the model works
 
-**Input** `4 × 256 × 256`: RGB plus the stroke channel.
-**Output** `1 × 256 × 256`: a soft boundary band.
+**Input** `4 × H × W`: RGB plus the brush channel.
+**Output** `1 × H × W`: a soft edge band.
 
-The target is a Gaussian-blurred boundary (σ = `target_sigma`), not a 1-px line —
-trainable under class imbalance and tolerant of 1-px annotation noise. Loss is
+The target is a Gaussian-blurred `gt_edge` (σ = `target_sigma`), not a 1-px line —
+a 1-px line is 1–3% positive pixels and a 1-px miss is a total loss. The band
+keeps the peak exactly on the edge while giving a graded penalty nearby, which is
+what makes the target trainable under class imbalance. Loss is
 `0.5·BCE(pos_weight=6) + 0.5·Dice + 0.1·L1`, masked by a validity map so padded
 crop regions contribute nothing.
 
 The architecture is a UNet with depthwise-separable blocks, width 20, depth 4:
 **0.34 M parameters, 1.58 GFLOPs** at 256². Measured on a 16-core CPU with
-`channels_last`: **18 ms/crop** at batch 1, 24 ms at batch 8.
+`channels_last` and 8 threads: **24 ms/crop** at batch 1.
 
-**Merging** preserves the reference `PredictionMerger`: average overlapping crop
-predictions, boost repeatedly brushed pixels, threshold, denoise, morphology.
+**Merging** averages overlapping crop predictions, boosts repeatedly brushed
+pixels, thresholds, denoises, and applies morphology.
 
-**Edge → mask** is deterministic:
+**Edge → line** is deterministic: threshold, thin to a 1-px skeleton
+(Zhang-Suen), then dilate to `line_width`. Thinning first means the line is
+uniform even where the brush pressure varied.
 
-1. Threshold and thin the edge (Zhang-Suen).
-2. Dilate into a 3-px barrier so the fill cannot leak through 1-px gaps.
-3. Label free space; the object is the enclosed component **adjacent to the stroke
-   ring**. Holes are separate components and are therefore preserved.
-4. Refine with a guided filter; fall back to GrabCut, then to the raw loop.
-5. An open stroke cannot define a region, so the endpoint returns the predicted
-   edge and flags `mode_used: "open_loop"` rather than guessing a blob.
+**Line → mask** is deterministic:
+
+1. Close hairline gaps up to `fill_close` px, then dilate into a barrier so the
+   flood cannot leak through a 1-px hole.
+2. Label free space; the object is the enclosed component **adjacent to the
+   line**. Other enclosed components are holes and are excluded, so donuts and
+   windows survive.
+3. Refine with a guided filter, then clear the holes again, then apply `expand`.
+4. An open line cannot define a region, so the endpoint returns the line and
+   reports `closed: false` rather than guessing a blob.
 
 ---
 
@@ -346,25 +458,25 @@ predictions, boost repeatedly brushed pixels, threshold, denoise, morphology.
 
 ```
 BAM/
-├── datasets/            # <name>/{train,val,test}/{im,gt,gt_edge} + meta.json
+├── datasets/            # <name>/{train,val,test}/{im,gt,gt_edge,gt_brush} + meta.json
 ├── model/               # trained weights (bam_v1.pth / .onnx)
 ├── frontend/
 │   ├── templates/       # base, select_dataset, index
-│   └── static/{css,js}
+│   └── static/{css,js}  # canvas.js, magic_brush.js, settings.js, ...
 ├── backend/
 │   ├── app.py           # Flask factory
-│   ├── routes/          # pages, datasets, masks, magic_pen, health
+│   ├── routes/          # pages, datasets, masks, magic_brush, health
 │   ├── inference/       # predictor, merger, edge_to_mask, registry
 │   └── services/        # storage, dataset_index, cache
 ├── training/
 │   ├── prepare/         # download, preprocess, dedupe
 │   ├── unet.py          # BAMUNet, self-contained
 │   ├── paths.py         # split scanning, torch-free
-│   ├── stroke_synth.py  # the data IP
+│   ├── stroke_synth.py  # clean_edge + synthesize_brush: the data IP
 │   ├── dataset.py, sampler.py, losses.py, metrics.py
 │   └── train.py, evaluate.py, export_onnx.py
 ├── tools/               # make_demo_subset, verify_alignment, visualize_crops, benchmark_cpu
-├── tests/               # 103 tests
+├── tests/               # 130 tests
 ├── config.py            # flat dataclass config
 ├── config.yaml
 ├── imgio.py             # unicode-safe image IO
@@ -414,12 +526,15 @@ Attribution is a legal obligation. If you redistribute the app, keep these credi
 
 ## Limitations
 
-- **Thin structures** (wires, cracks): use `mode: "line"`, which returns an edge
-  ribbon instead of a filled region.
+- **Thin structures** (wires, cracks): the line is the product. Fill adds little,
+  and the accepted line at `line_width` is usually the right answer.
 - **Transparent or heavily occluded objects**: boundaries are genuinely ambiguous.
 - **Objects under ~16 px** at the working resolution: below the model's useful scale.
-- **Open strokes** cannot be filled; the UI tells the user to close the loop.
+- **Open lines** cannot be filled; the UI disables Fill and says so.
 - **One object per loop**: multiple loops in one pass are unioned.
+- **A very thick brush over-fills**: the region covers the line itself, so a 20 px
+  stroke adds ~10 px around the object. The accepted line is 3 px, so in practice
+  the bias is sub-pixel.
 
 ---
 
@@ -430,7 +545,9 @@ pytest -q
 python -m pyflakes backend training tools tests config.py imgio.py run.py
 ```
 
-103 tests cover config precedence, stroke-synthesis invariants, joint-transform
-alignment, crop-bucket coverage, model shapes and checkpoint round-trips, merge
-arithmetic, the fill algorithm (hole preservation, open-loop handling), the API
-contract across splits, and path-traversal rejection.
+130 tests cover config precedence and crop sizing, edge/brush synthesis
+invariants (the clean edge sits on the boundary and covers the whole perimeter;
+the brush is not the edge), joint-transform alignment, crop-bucket coverage,
+model shapes and checkpoint round-trips, merge arithmetic, the fill algorithm
+(hole preservation, open-line handling, gap bridging), the API contract across
+splits, and path-traversal rejection.

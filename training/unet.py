@@ -10,7 +10,7 @@ takes every parameter through the constructor. (The reference masker repository
 has ``model/unet.py`` importing ``from config import Config`` while ``config.py``
 is absent, which makes the model impossible to import on its own.)
 
-Input:  ``[N, 4, H, W]`` float tensor -- RGB + stroke channel.
+Input:  ``[N, 4, H, W]`` float tensor -- RGB + brush channel.
 Output: ``[N, 1, H, W]`` logits. Apply sigmoid for probabilities.
 """
 
@@ -79,7 +79,7 @@ class DoubleBlock(nn.Module):
 
 
 class BAMUNet(nn.Module):
-    """Lightweight UNet for stroke-conditioned boundary prediction."""
+    """Lightweight UNet for brush-conditioned edge prediction."""
 
     def __init__(
         self,

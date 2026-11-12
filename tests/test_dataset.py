@@ -13,6 +13,7 @@ def test_scan_split_pairs_images_and_masks(cfg):
         assert item["im"].is_file()
         assert item["gt"].is_file()
         assert item["edge"] is not None
+        assert item["brush"] is not None
 
 
 def test_scan_split_missing_split_raises(cfg):
@@ -33,10 +34,30 @@ def test_dataset_item_shapes(cfg):
     assert item["weight"].max() <= 1.0
 
 
-def test_dataset_stroke_channel_is_not_empty(cfg):
+def test_dataset_brush_channel_is_not_empty(cfg):
     dataset = build_dataset(cfg, "train", train=True, length=8)
     fractions = [float(dataset[i]["image"][3].mean()) for i in range(4)]
     assert max(fractions) > 0.0
+
+
+def test_dataset_target_is_the_clean_edge_not_the_brush(cfg):
+    """The 4th input channel and the target must be different rasters.
+
+    If the model could pass by copying its input the task would be trivial, so
+    this is the invariant that keeps brush synthesis and edge generation
+    separate.
+    """
+    dataset = build_dataset(cfg, "train", train=True, length=4)
+    for i in range(4):
+        item = dataset[i]
+        brush = item["image"][3].numpy()
+        target = item["target"][0].numpy()
+        brush_hot = brush > 0.5
+        target_hot = target > 0.5
+        if not brush_hot.any() or not target_hot.any():
+            continue
+        overlap = float((brush_hot & target_hot).sum()) / float(target_hot.sum())
+        assert overlap < 0.95
 
 
 def test_dataset_val_is_deterministic(cfg):
@@ -64,30 +85,30 @@ def test_geometric_augment_keeps_arrays_aligned():
     rgb = np.zeros((height, width, 3), np.uint8)
     gt = np.zeros((height, width), np.uint8)
     gt[:, 40:42] = 255
-    stroke = np.zeros((height, width), np.uint8)
-    stroke[:, 38:44] = 255
+    brush = np.zeros((height, width), np.uint8)
+    brush[:, 38:44] = 255
     valid = np.ones((height, width), np.uint8)
 
     rng = np.random.default_rng(0)
-    out_rgb, out_gt, out_stroke, out_valid = geometric_augment(
-        rgb, gt, stroke, valid, rng, p_flip=1.0, p_rot90=0.0, p_rotate=0.0
+    out_rgb, out_gt, out_brush, out_valid = geometric_augment(
+        rgb, gt, brush, valid, rng, p_flip=1.0, p_rot90=0.0, p_rotate=0.0
     )
 
-    assert out_rgb.shape[:2] == out_gt.shape == out_stroke.shape == out_valid.shape
+    assert out_rgb.shape[:2] == out_gt.shape == out_brush.shape == out_valid.shape
     columns = set(np.nonzero(out_gt.any(axis=0))[0].tolist())
     assert columns == {38, 39}
-    stroke_columns = set(np.nonzero(out_stroke.any(axis=0))[0].tolist())
-    assert min(stroke_columns) <= 38 and max(stroke_columns) >= 39
+    brush_columns = set(np.nonzero(out_brush.any(axis=0))[0].tolist())
+    assert min(brush_columns) <= 38 and max(brush_columns) >= 39
 
 
 def test_geometric_augment_rotation_keeps_shapes():
     rgb = np.random.default_rng(0).integers(0, 255, (64, 64, 3), dtype=np.uint8)
     gt = np.zeros((64, 64), np.uint8)
     gt[20:40, 20:40] = 255
-    stroke = gt.copy()
+    brush = gt.copy()
     valid = np.ones((64, 64), np.uint8)
     rng = np.random.default_rng(1)
-    out = geometric_augment(rgb, gt, stroke, valid, rng, p_flip=0.0, p_rot90=0.0, p_rotate=1.0)
+    out = geometric_augment(rgb, gt, brush, valid, rng, p_flip=0.0, p_rot90=0.0, p_rotate=1.0)
     assert all(a.shape[:2] == (64, 64) for a in out)
     assert out[1].max() == 255
 

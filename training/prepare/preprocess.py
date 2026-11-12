@@ -1,14 +1,14 @@
 """Preprocess a dataset into the layout the trainer expects.
 
-Source layout (any size, ``gt_edge`` optional)::
+Source layout (any size, ``gt_edge``/``gt_brush`` optional)::
 
     <source>/train/im/  <source>/train/gt/
     <source>/val/im/    <source>/val/gt/
     <source>/test/im/   <source>/test/gt/
 
-Output layout (canonical size + synthetic strokes)::
+Output layout (canonical size, clean edge + brush stroke)::
 
-    <out>/train/im/  <out>/train/gt/  <out>/train/gt_edge/
+    <out>/train/im/  <out>/train/gt/  <out>/train/gt_edge/  <out>/train/gt_brush/
     ...
 
 What it does per split:
@@ -17,13 +17,20 @@ What it does per split:
 2. Rejects samples whose mask is empty, tiny, or geometrically broken.
 3. Downscales image and mask to a canonical short side (never upscales). Both are
    resized from the same dimensions, so they cannot drift apart.
-4. Writes ``gt_edge/``: one synthetic user stroke per mask, seed 0, so the
-   validation set is reproducible.
-5. Writes ``meta.json`` with counts and rejection reasons.
+4. Writes ``gt_edge/``: the clean boundary line of the mask. Deterministic, no
+   RNG — this is the target the model has to predict.
+5. Writes ``gt_brush/``: one synthetic brush stroke per mask, seed 0, so the
+   validation set is reproducible. This is the model's 4th input channel.
+6. Writes ``meta.json`` with counts and rejection reasons.
 
-Cropping to 256 happens at training time, not here: a 640x640 image would yield
-dozens of overlapping crops and the sampler deliberately varies scale and
-position. Materialising them would multiply disk usage for no benefit.
+Both rasters are written at the final resolution, after downscaling, because a
+stroke generated at 4K and then shrunk would lose exactly the sub-pixel wobble
+the model is supposed to correct.
+
+Cropping to the training crop happens at training time, not here: a 640x640
+image would yield dozens of overlapping crops and the sampler deliberately
+varies scale and position. Materialising them would multiply disk usage for no
+benefit.
 
     python -m training.prepare.preprocess --dataset datasets/DIS5K
     # -> datasets/DIS5K_prepared
@@ -61,10 +68,11 @@ from imgio import (  # noqa: E402
 )
 from training.paths import SPLITS, pair_split  # noqa: E402
 from training.stroke_synth import (  # noqa: E402
-    StrokeParams,
+    BrushParams,
     boundary_from_mask,
+    clean_edge,
     ensure_binary,
-    synthesize_stroke,
+    synthesize_brush,
 )
 
 
@@ -108,6 +116,7 @@ def preprocess_split(
     dry_run: bool = False,
     limit: int | None = None,
     make_edge: bool = True,
+    make_brush: bool = True,
     backup: bool = False,
 ) -> dict:
     if not (source / split / "im").is_dir():
@@ -128,11 +137,13 @@ def preprocess_split(
     im_out = dest / split / "im"
     gt_out = dest / split / "gt"
     edge_out = dest / split / "gt_edge"
+    brush_out = dest / split / "gt_brush"
 
-    params = StrokeParams()
+    params = BrushParams()
     processed = 0
     resized = 0
     edges = 0
+    brushes = 0
     rejected: list[dict] = []
 
     for item in pairs:
@@ -173,9 +184,13 @@ def preprocess_split(
 
             edge_path = edge_out / f"{item['stem']}.png"
             if make_edge and (force or not edge_path.is_file()):
-                stroke = synthesize_stroke(gt, rgb=rgb, params=params, rng=0)
-                imwrite(edge_path, stroke)
+                imwrite(edge_path, clean_edge(gt))
                 edges += 1
+
+            brush_path = brush_out / f"{item['stem']}.png"
+            if make_brush and (force or not brush_path.is_file()):
+                imwrite(brush_path, synthesize_brush(gt, rgb=rgb, params=params, rng=0))
+                brushes += 1
 
         processed += 1
         if processed % 500 == 0:
@@ -187,6 +202,7 @@ def preprocess_split(
         "processed": processed,
         "resized": resized,
         "edges_written": edges,
+        "brushes_written": brushes,
         "rejected": len(rejected),
         "rejections": rejected[:20],
     }
@@ -200,8 +216,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--inplace", action="store_true", help="rewrite the dataset itself")
     parser.add_argument("--short-side", type=int, default=None)
     parser.add_argument("--limit", type=int, default=None, help="max images per split")
-    parser.add_argument("--force", action="store_true", help="regenerate gt_edge")
+    parser.add_argument("--force", action="store_true", help="regenerate gt_edge and gt_brush")
     parser.add_argument("--no-edge", action="store_true", help="skip gt_edge creation")
+    parser.add_argument("--no-brush", action="store_true", help="skip gt_brush creation")
     parser.add_argument("--backup", action="store_true", help="copy im/gt to _original/ first")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -237,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             limit=args.limit,
             make_edge=not args.no_edge,
+            make_brush=not args.no_brush,
             backup=args.backup,
         )
         reports.append(report)

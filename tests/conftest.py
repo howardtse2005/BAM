@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config import Config  # noqa: E402
-from training.stroke_synth import synthesize_stroke  # noqa: E402
+from training.stroke_synth import clean_edge, synthesize_brush  # noqa: E402
 
 SPLIT_SIZES = {"train": 4, "val": 1, "test": 1}
 
@@ -36,7 +36,7 @@ def dataset_root(tmp_path_factory) -> Path:
     index = 0
 
     for split, count in SPLIT_SIZES.items():
-        for sub in ("im", "gt", "gt_edge"):
+        for sub in ("im", "gt", "gt_edge", "gt_brush"):
             (dataset / split / sub).mkdir(parents=True, exist_ok=True)
 
         for _ in range(count):
@@ -47,14 +47,16 @@ def dataset_root(tmp_path_factory) -> Path:
             cv2.ellipse(gt, (cx, cy), (70, 48), index * 9, 0, 360, 255, -1)
             rgb[gt > 0] = (30 + index * 8, 150, 90)
 
-            stroke = synthesize_stroke(gt, rgb=rgb, rng=index)
+            edge = clean_edge(gt)
+            brush = synthesize_brush(gt, rgb=rgb, rng=index)
             stem = f"{index:09d}"
 
             _write_image(
                 dataset / split / "im" / f"{stem}.jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             )
             _write_image(dataset / split / "gt" / f"{stem}.png", gt)
-            _write_image(dataset / split / "gt_edge" / f"{stem}.png", stroke)
+            _write_image(dataset / split / "gt_edge" / f"{stem}.png", edge)
+            _write_image(dataset / split / "gt_brush" / f"{stem}.png", brush)
             index += 1
 
     return root

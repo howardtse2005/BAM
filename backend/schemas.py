@@ -43,6 +43,17 @@ class SegmentRequest:
 
 
 @dataclass
+class FillRequest:
+    dataset: str
+    split: str
+    image: str
+    width: int
+    height: int
+    line: np.ndarray
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class LegacyCrop:
     image: np.ndarray  # RGB uint8
     x0: int
@@ -109,6 +120,8 @@ def parse_params(raw: dict | None, cfg) -> dict[str, Any]:
         "expand": int(_clamp(raw.get("expand", cfg.expand), -16, 16, 0)),
         "smooth": int(_clamp(raw.get("smooth", cfg.smooth), 0, 4, 2)),
         "mode": mode,
+        "line_width": int(_clamp(raw.get("line_width", cfg.line_width), 1, 32, cfg.line_width)),
+        "fill_close": int(_clamp(raw.get("fill_close", cfg.fill_close), 0, 16, cfg.fill_close)),
         "merge_weighting": weighting,
         "apply_morphology": bool(raw.get("apply_morphology", cfg.apply_morphology)),
         "morph_kernel_size": int(_clamp(raw.get("morph_kernel_size", cfg.morph_kernel), 1, 15, 3)),
@@ -117,6 +130,23 @@ def parse_params(raw: dict | None, cfg) -> dict[str, Any]:
         ),
         "apply_dbscan": bool(raw.get("apply_dbscan", cfg.apply_dbscan)),
     }
+
+
+def _parse_crop_size(raw: Any, cfg) -> int:
+    """Validate an inference crop size.
+
+    The crop is not fixed at 256: the client picks it from the canvas size so a
+    crop always covers the same fraction of the object. It must stay a multiple
+    of 32 (four pooling stages) and inside ``[crop_min, crop_size]``.
+    """
+    size = int(_clamp(raw, 32, 512, cfg.crop_size))
+    if size % 32 != 0:
+        raise ValidationError(f"crop size must be a multiple of 32, got {size}")
+    if not cfg.crop_min <= size <= cfg.crop_size:
+        raise ValidationError(
+            f"crop size must be in [{cfg.crop_min}, {cfg.crop_size}], got {size}"
+        )
+    return size
 
 
 def parse_segment(payload: dict, cfg) -> SegmentRequest:
@@ -145,9 +175,7 @@ def parse_segment(payload: dict, cfg) -> SegmentRequest:
     for item in raw_crops:
         if not isinstance(item, dict):
             raise ValidationError("each crop must be an object")
-        size = int(_clamp(item.get("size", cfg.crop_size), 32, 512, cfg.crop_size))
-        if size != cfg.crop_size:
-            raise ValidationError(f"crop size must be {cfg.crop_size}, got {size}")
+        size = _parse_crop_size(item.get("size", cfg.crop_size), cfg)
         crops.append(
             CropSpec(
                 x0=int(_clamp(item.get("x0", 0), -4096, 4096, 0)),
@@ -155,6 +183,10 @@ def parse_segment(payload: dict, cfg) -> SegmentRequest:
                 size=size,
             )
         )
+
+    sizes = {crop.size for crop in crops}
+    if len(sizes) != 1:
+        raise ValidationError("all crops must share one size")
 
     stroke_b64 = payload.get("stroke_mask")
     if not isinstance(stroke_b64, str) or not stroke_b64:
@@ -179,8 +211,47 @@ def parse_segment(payload: dict, cfg) -> SegmentRequest:
     )
 
 
+def parse_fill(payload: dict, cfg) -> FillRequest:
+    """Parse the body of ``/api/fill``: an accepted line plus fill knobs."""
+    if not isinstance(payload, dict):
+        raise ValidationError("body must be a JSON object")
+
+    dataset = safe_name(_require(payload, "dataset", str), "dataset")
+    split = safe_split(payload.get("split"))
+    image = safe_name(_require(payload, "image", str), "image")
+
+    canvas = payload.get("canvas") or {}
+    if not isinstance(canvas, dict):
+        raise ValidationError("canvas must be an object")
+    width = int(_clamp(canvas.get("width", 0), 1, cfg.max_canvas_side, 0))
+    height = int(_clamp(canvas.get("height", 0), 1, cfg.max_canvas_side, 0))
+    if width <= 0 or height <= 0:
+        raise ValidationError("canvas dimensions are required")
+
+    line_b64 = payload.get("line_mask")
+    if not isinstance(line_b64, str) or not line_b64:
+        raise ValidationError("line_mask is required")
+    try:
+        line = decode_mask_bytes(decode_data_url(line_b64))
+    except StorageError as exc:
+        raise ValidationError(f"line_mask: {exc}") from exc
+
+    if line.shape[:2] != (height, width):
+        line = cv2.resize(line, (width, height), interpolation=cv2.INTER_NEAREST)
+
+    return FillRequest(
+        dataset=dataset,
+        split=split,
+        image=image,
+        width=width,
+        height=height,
+        line=line,
+        params=parse_params(payload.get("params"), cfg),
+    )
+
+
 def parse_legacy_crops(payload: dict, cfg) -> tuple[list[LegacyCrop], dict, int, int]:
-    """Parse the masker-compatible ``/magic_pen/predict_crops`` body."""
+    """Parse the reference client's ``predict_crops`` body."""
     if not isinstance(payload, dict):
         raise ValidationError("body must be a JSON object")
 
@@ -263,8 +334,10 @@ __all__ = [
     "ValidationError",
     "CropSpec",
     "SegmentRequest",
+    "FillRequest",
     "LegacyCrop",
     "parse_segment",
+    "parse_fill",
     "parse_legacy_crops",
     "parse_params",
     "pseudo_stroke",

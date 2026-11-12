@@ -3,13 +3,15 @@
 A dataset looks like this:
 
     datasets/<name>/
-        train/im/*.jpg   train/gt/*.png   train/gt_edge/*.png
-        val/im/*.jpg     val/gt/*.png     val/gt_edge/*.png
-        test/im/*.jpg    test/gt/*.png    test/gt_edge/*.png
+        train/im/*.jpg     train/gt/*.png
+        train/gt_edge/*.png    train/gt_brush/*.png
+        val/im/*.jpg       val/gt/*.png       val/gt_edge/*.png   val/gt_brush/*.png
+        test/im/*.jpg      test/gt/*.png      test/gt_edge/*.png  test/gt_brush/*.png
 
-Images and masks are paired by filename stem, case-insensitively. ``gt_edge`` is
-optional; it is created by preprocessing and used for deterministic validation
-strokes.
+``gt_edge`` is the clean boundary line the model predicts. ``gt_brush`` is the
+rough brush stroke the model receives. Both are produced by preprocessing;
+either may be absent, and the trainer falls back to generating it from ``gt``.
+Images and masks are paired by filename stem, case-insensitively.
 """
 
 from __future__ import annotations
@@ -27,11 +29,16 @@ def pair_split(
     require_gt: bool = True,
     verbose: bool = True,
 ) -> list[dict[str, Any]]:
-    """Pair every image in ``<root>/<split>/im`` with ``<root>/<split>/gt``."""
+    """Pair every image in ``<root>/<split>/im`` with ``<root>/<split>/gt``.
+
+    ``gt_edge`` and ``gt_brush`` are attached when present; a missing pair is
+    not an error, because both rasters are reproducible from ``gt``.
+    """
     root = Path(root)
     im_dir = root / split / "im"
     gt_dir = root / split / "gt"
     edge_dir = root / split / "gt_edge"
+    brush_dir = root / split / "gt_brush"
 
     if not im_dir.is_dir():
         raise FileNotFoundError(f"missing image folder: {im_dir}")
@@ -54,6 +61,7 @@ def pair_split(
             missing += 1
             continue
         edge = edge_dir / f"{path.stem}.png"
+        brush = brush_dir / f"{path.stem}.png"
         stat = path.stat()
         files.append(
             {
@@ -61,6 +69,7 @@ def pair_split(
                 "im": path,
                 "gt": mask,
                 "edge": edge if edge.is_file() else None,
+                "brush": brush if brush.is_file() else None,
                 "size": int(stat.st_size),
                 "mtime": int(stat.st_mtime_ns),
             }

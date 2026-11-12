@@ -4,7 +4,8 @@
     python tools/benchmark_cpu.py --checkpoint model/bam_v1.pth --threads 4 8 12
     python tools/benchmark_cpu.py --random --widths 16 20 24 32 --csv reports/bench.csv
 
-Reports milliseconds per crop, which is what the stroke budget is built from.
+Reports milliseconds per crop, which is what the per-stroke latency budget is
+built from.
 """
 
 from __future__ import annotations

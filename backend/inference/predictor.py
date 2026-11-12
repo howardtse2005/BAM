@@ -1,4 +1,4 @@
-"""Batched inference for the magic pen.
+"""Batched inference for the magic brush.
 
 Backends share one contract: ``__call__(batch) -> probabilities`` where
 ``batch`` is ``[N, 4, H, W]`` float32 already normalised, and the output is
@@ -107,11 +107,12 @@ class OnnxBackend(BaseBackend):
 
 
 class MockBackend(BaseBackend):
-    """Deterministic stand-in: predicts a band around the stroke channel.
+    """Deterministic stand-in: predicts a band around the brush channel.
 
-    This is not a model. It exists so the API, the merge, the fill and the UI can
-    be tested end to end before the first checkpoint exists. It is never selected
-    silently: ``/api/health`` reports ``model: mock`` and the UI shows a warning.
+    This is not a model. It exists so the API, the merge, the line and the fill
+    can be tested end to end before the first checkpoint exists. It is never
+    selected silently: ``/api/health`` reports ``model: mock`` and the UI shows a
+    warning.
     """
 
     name = "mock"
@@ -120,8 +121,8 @@ class MockBackend(BaseBackend):
     def __call__(self, batch: np.ndarray) -> np.ndarray:
         outputs = []
         for i in range(batch.shape[0]):
-            stroke = np.clip(batch[i, 3], 0.0, 1.0).astype(np.float32)
-            band = cv2.GaussianBlur(stroke, (0, 0), 3.0)
+            brush = np.clip(batch[i, 3], 0.0, 1.0).astype(np.float32)
+            band = cv2.GaussianBlur(brush, (0, 0), 3.0)
             peak = float(band.max())
             if peak > 1e-6:
                 band = band / peak
@@ -153,36 +154,36 @@ class Predictor:
         self.last_batches = 0
 
     def preprocess(
-        self, rgb_crops: list[np.ndarray], stroke_crops: list[np.ndarray]
+        self, rgb_crops: list[np.ndarray], brush_crops: list[np.ndarray]
     ) -> np.ndarray:
-        if len(rgb_crops) != len(stroke_crops):
-            raise ValueError("rgb and stroke crop counts differ")
+        if len(rgb_crops) != len(brush_crops):
+            raise ValueError("rgb and brush crop counts differ")
         if not rgb_crops:
             raise ValueError("no crops supplied")
 
         height, width = rgb_crops[0].shape[:2]
         batch = np.zeros((len(rgb_crops), 4, height, width), np.float32)
 
-        for i, (rgb, stroke) in enumerate(zip(rgb_crops, stroke_crops)):
+        for i, (rgb, brush) in enumerate(zip(rgb_crops, brush_crops)):
             if rgb.shape[:2] != (height, width):
                 raise ValueError("all crops must share one size")
-            if stroke.shape[:2] != (height, width):
-                raise ValueError("stroke crop size mismatch")
+            if brush.shape[:2] != (height, width):
+                raise ValueError("brush crop size mismatch")
 
             rgb_f = rgb.astype(np.float32) / 255.0
-            stroke_f = stroke.astype(np.float32)
-            if stroke_f.max(initial=0) > 1.5:
-                stroke_f = stroke_f / 255.0
+            brush_f = brush.astype(np.float32)
+            if brush_f.max(initial=0) > 1.5:
+                brush_f = brush_f / 255.0
 
             batch[i, :3] = rgb_f.transpose(2, 0, 1)
-            batch[i, 3] = stroke_f
+            batch[i, 3] = brush_f
 
         return (batch - self.mean) / self.std
 
     def predict(
-        self, rgb_crops: list[np.ndarray], stroke_crops: list[np.ndarray]
+        self, rgb_crops: list[np.ndarray], brush_crops: list[np.ndarray]
     ) -> np.ndarray:
-        batch = self.preprocess(rgb_crops, stroke_crops)
+        batch = self.preprocess(rgb_crops, brush_crops)
         outputs = []
         started = time.perf_counter()
         self.last_batches = 0

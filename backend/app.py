@@ -49,14 +49,14 @@ def create_app(config=None, config_path=None, overrides=None) -> Flask:
 
     from .routes import datasets as datasets_routes
     from .routes import health as health_routes
-    from .routes import magic_pen as magic_pen_routes
+    from .routes import magic_brush as magic_brush_routes
     from .routes import masks as masks_routes
     from .routes import pages as pages_routes
 
     app.register_blueprint(pages_routes.bp)
     app.register_blueprint(datasets_routes.bp)
     app.register_blueprint(masks_routes.bp)
-    app.register_blueprint(magic_pen_routes.bp)
+    app.register_blueprint(magic_brush_routes.bp)
     app.register_blueprint(health_routes.bp)
 
     @app.errorhandler(413)
@@ -71,16 +71,19 @@ def create_app(config=None, config_path=None, overrides=None) -> Flask:
             413,
         )
 
+    def _is_api(path: str) -> bool:
+        return path.startswith("/api/") or path.startswith("/magic_brush/")
+
     @app.errorhandler(404)
     def not_found(_error):
-        if request.path.startswith("/api/") or request.path.startswith("/magic_pen/"):
+        if _is_api(request.path):
             return jsonify({"status": "error", "message": "not found"}), 404
         return "Not found", 404
 
     @app.errorhandler(500)
     def server_error(error):
         app.logger.exception("unhandled error: %s", error)
-        if request.path.startswith("/api/") or request.path.startswith("/magic_pen/"):
+        if _is_api(request.path):
             return jsonify({"status": "error", "message": "internal server error"}), 500
         return "Internal server error", 500
 

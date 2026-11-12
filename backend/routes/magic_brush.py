@@ -1,12 +1,19 @@
-"""Magic pen endpoints.
+"""Magic brush endpoints.
 
-``/api/segment`` is the BAM path: it slices crops server-side from the stored
-image, batches them through the model, merges the predictions, and converts the
-edge into a filled mask.
+The magic brush is a two-step interaction:
 
-``/magic_pen/predict_crops`` keeps the reference repository's request/response
-shape so an existing client keeps working. It returns an edge mask, not a filled
-one, exactly like the original.
+1. ``POST /api/segment`` — the user drags a rough stroke along the object edge.
+   The server slices small square crops across that stroke, batches them through
+   the UNet with the stroke itself, merges the per-crop predictions, and returns
+   the predicted **clean line**. Nothing is committed yet: the line replaces the
+   wobbly stroke on screen so the user can judge it, re-stroke, or accept it.
+
+2. ``POST /api/fill`` — once the line is accepted and encloses the object, the
+   enclosed region is flooded into a filled mask.
+
+``/api/magic_brush/predict_crops`` and ``/api/magic_brush/predict_single_crop``
+keep the reference repository's request/response shape for clients that send
+crop images instead of crop boxes. They return the raw edge mask, not a line.
 """
 
 from __future__ import annotations
@@ -18,19 +25,24 @@ import numpy as np
 from flask import Blueprint, request
 
 from ..deps import cfg, fail, index, ok, registry
-from ..inference.edge_to_mask import edge_to_mask
-from ..inference.merger import CropPlacement, PredictionMerger
+from ..inference.edge_to_mask import edge_to_mask, line_is_closed, line_to_mask, ribbon
+from ..inference.merger import (
+    CropPlacement,
+    PredictionMerger,
+    apply_morphological_filtering,
+)
 from ..inference.registry import ModelUnavailable
 from ..schemas import (
     CropSpec,
     ValidationError,
+    parse_fill,
     parse_legacy_crops,
     parse_segment,
     pseudo_stroke,
 )
 from ..services.storage import StorageError, encode_png_base64
 
-bp = Blueprint("magic_pen", __name__)
+bp = Blueprint("magic_brush", __name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -55,7 +67,11 @@ def _validity(placement: CropPlacement, height: int, width: int) -> np.ndarray:
 def _slice_crops(
     rgb: np.ndarray, stroke: np.ndarray, crops: list[CropSpec]
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[CropPlacement], list[np.ndarray]]:
-    """Slice crops from replicate-padded arrays so edges never get fake black."""
+    """Slice crops from replicate-padded arrays so edges never get fake black.
+
+    The RGB patch and the stroke patch are cut with identical integer offsets,
+    which is what keeps the 4th channel pixel-aligned with the image.
+    """
     size = crops[0].size
     half = size // 2
 
@@ -102,8 +118,17 @@ def _merge(
     return merger
 
 
+def _load_canvas_rgb(req) -> np.ndarray:
+    """Load the stored image resized to the canvas the client is drawing on."""
+    rgb = index().load_rgb(req.dataset, req.split, req.image)
+    target = (req.canvas_height, req.canvas_width)
+    if rgb.shape[:2] != target:
+        rgb = cv2.resize(rgb, (target[1], target[0]), interpolation=cv2.INTER_AREA)
+    return rgb
+
+
 # --------------------------------------------------------------------------- #
-# /api/segment
+# /api/segment — stroke -> predicted line
 # --------------------------------------------------------------------------- #
 
 
@@ -116,18 +141,11 @@ def segment():
         return fail(exc, 400)
 
     try:
-        rgb = index().load_rgb(req.dataset, req.split, req.image)
+        rgb = _load_canvas_rgb(req)
     except KeyError as exc:
         return fail(exc, 404)
     except Exception as exc:
         return fail(f"could not load image: {exc}", 500)
-
-    if rgb.shape[:2] != (req.canvas_height, req.canvas_width):
-        rgb = cv2.resize(
-            rgb,
-            (req.canvas_width, req.canvas_height),
-            interpolation=cv2.INTER_AREA,
-        )
 
     rgb_crops, stroke_crops, placements, valids = _slice_crops(rgb, req.stroke, req.crops)
     if not rgb_crops:
@@ -162,26 +180,35 @@ def segment():
         expand=params["expand"],
         smooth=params["smooth"],
         mode=params["mode"],
+        line_width=params["line_width"],
     )
 
-    if params["mode"] == "object" and fill.mode not in ("line", "empty"):
-        # The fill already produced a clean mask; morphology is only a safety net
-        # for speckle, applied after the region is closed.
-        if params["apply_morphology"] and fill.mask.any():
-            from ..inference.merger import apply_morphological_filtering
-
-            fill.mask = apply_morphological_filtering(
-                fill.mask, params["morph_kernel_size"], params["morph_iterations"]
+    if params["mode"] == "line":
+        line = fill.mask
+        filled = None
+    else:
+        # The line is always available, even when a filled mask was requested:
+        # the UI shows it while the region is being judged.
+        line = ribbon(fill.edge, params["line_width"])
+        filled = fill.mask
+        if params["apply_morphology"] and filled.any():
+            filled = apply_morphological_filtering(
+                filled, params["morph_kernel_size"], params["morph_iterations"]
             )
 
+    closed = line_is_closed(line, gap=params["fill_close"])
     post_ms = (time.perf_counter() - post_started) * 1000.0
 
     return ok(
-        mask_base64=encode_png_base64(fill.mask),
+        line_base64=encode_png_base64(line),
+        mask_base64=encode_png_base64(filled) if filled is not None else None,
         edge_base64=encode_png_base64(fill.edge),
+        closed=closed,
+        fillable=bool(closed and params["mode"] == "line"),
         confidence=fill.confidence,
         low_confidence=bool(fill.low_confidence),
         mode_used=fill.mode,
+        crop_size=int(req.crops[0].size),
         canvas={"width": req.canvas_width, "height": req.canvas_height},
         stats={
             "num_crops": len(rgb_crops),
@@ -196,11 +223,57 @@ def segment():
 
 
 # --------------------------------------------------------------------------- #
-# Masker-compatible endpoints
+# /api/fill — accepted line -> filled region
 # --------------------------------------------------------------------------- #
 
 
-@bp.post("/magic_pen/predict_crops")
+@bp.post("/api/fill")
+def fill():
+    payload = request.get_json(silent=True)
+    try:
+        req = parse_fill(payload, cfg())
+    except ValidationError as exc:
+        return fail(exc, 400)
+
+    try:
+        rgb = index().load_rgb(req.dataset, req.split, req.image)
+    except KeyError as exc:
+        return fail(exc, 404)
+    except Exception as exc:
+        return fail(f"could not load image: {exc}", 500)
+
+    if rgb.shape[:2] != (req.height, req.width):
+        rgb = cv2.resize(rgb, (req.width, req.height), interpolation=cv2.INTER_AREA)
+
+    params = req.params
+    started = time.perf_counter()
+    result = line_to_mask(
+        req.line,
+        rgb=rgb,
+        close=params["fill_close"],
+        smooth=params["smooth"],
+        expand=params["expand"],
+        threshold=params["threshold"],
+    )
+    elapsed = (time.perf_counter() - started) * 1000.0
+
+    return ok(
+        mask_base64=encode_png_base64(result.mask),
+        grew=result.grew,
+        added_px=result.added_px,
+        mode_used=result.mode,
+        confidence=result.confidence,
+        canvas={"width": req.width, "height": req.height},
+        stats={"ms_fill": round(elapsed, 1)},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Reference-client endpoints
+# --------------------------------------------------------------------------- #
+
+
+@bp.post("/api/magic_brush/predict_crops")
 def predict_crops():
     payload = request.get_json(silent=True)
     try:
@@ -282,7 +355,7 @@ def predict_crops():
     )
 
 
-@bp.post("/magic_pen/predict_single_crop")
+@bp.post("/api/magic_brush/predict_single_crop")
 def predict_single_crop():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):

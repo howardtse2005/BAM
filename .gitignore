@@ -13,9 +13,10 @@ env/
 datasets/DIS5K*
 datasets/_raw/
 datasets/_qa/
-datasets/*/rgb/
-datasets/*/gt/
-datasets/*/gt_edge/
+datasets/**/rgb/
+datasets/**/gt/
+datasets/**/gt_edge/
+datasets/**/gt_brush/
 datasets/manifest.json
 !datasets/README.md
 

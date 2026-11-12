@@ -26,9 +26,9 @@ def test_cli_override_wins_over_env(monkeypatch):
 
 
 def test_tuple_coercion():
-    cfg = Config.from_dict({"stroke_wobble_amp": [0.5, 2.5]})
-    assert isinstance(cfg.stroke_wobble_amp, tuple)
-    assert cfg.stroke_wobble_amp == (0.5, 2.5)
+    cfg = Config.from_dict({"brush_wobble_amp": [0.5, 2.5]})
+    assert isinstance(cfg.brush_wobble_amp, tuple)
+    assert cfg.brush_wobble_amp == (0.5, 2.5)
 
 
 def test_int_and_float_coercion():
@@ -42,6 +42,9 @@ def test_int_and_float_coercion():
     [
         {"crop_size": 250},
         {"crop_stride": 512, "crop_size": 256},
+        {"crop_min": 512},
+        {"crop_min": 100},
+        {"crop_ratio": 0.0},
         {"tier": "C"},
         {"block": "unknown"},
         {"mode": "banana"},
@@ -53,6 +56,25 @@ def test_int_and_float_coercion():
 def test_validation_rejects(payload):
     with pytest.raises(ValueError):
         Config.from_dict(payload).validate()
+
+
+@pytest.mark.parametrize(
+    "height,width,expected",
+    [
+        (640, 640, 256),  # canonical short side keeps the training crop
+        (640, 960, 256),
+        (400, 400, 160),  # a smaller canvas gets a smaller crop
+        (200, 300, 64),  # 80 snapped down to a multiple of 32
+        (100, 100, 64),  # clamped to crop_min
+        (4000, 3000, 256),  # never above the training crop
+    ],
+)
+def test_crop_for_tracks_the_canvas_size(height, width, expected):
+    cfg = Config.from_dict({})
+    size = cfg.crop_for(height, width)
+    assert size == expected
+    assert size % 32 == 0
+    assert cfg.crop_min <= size <= cfg.crop_size
 
 
 def test_unknown_override_key_is_rejected():

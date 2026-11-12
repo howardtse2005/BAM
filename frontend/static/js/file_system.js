@@ -91,16 +91,6 @@ export class FileSystem {
       })
     );
   }
-
-  async segment(payload) {
-    return parse(
-      await fetch("/api/segment", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      })
-    );
-  }
 }
 
 export function imageUrl(dataset, split, name) {

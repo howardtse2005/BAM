@@ -48,9 +48,13 @@ def public_config():
         config={
             "dataset": c.dataset,
             "crop_size": c.crop_size,
+            "crop_min": c.crop_min,
+            "crop_ratio": c.crop_ratio,
             "crop_stride": c.crop_stride,
             "max_crops": c.max_crops,
             "short_side": c.short_side,
+            "line_width": c.line_width,
+            "fill_close": c.fill_close,
             "splits": ["train", "val", "test"],
             "params": {
                 "sensitivity": c.sensitivity,
@@ -59,6 +63,8 @@ def public_config():
                 "expand": c.expand,
                 "smooth": c.smooth,
                 "mode": c.mode,
+                "line_width": c.line_width,
+                "fill_close": c.fill_close,
                 "merge_weighting": c.merge_weighting,
             },
         }

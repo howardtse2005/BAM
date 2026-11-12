@@ -1,6 +1,6 @@
 # datasets/
 
-One folder per dataset, three splits, two authored subfolders plus one generated:
+One folder per dataset, three splits, two authored subfolders plus two generated:
 
 ```
 datasets/
@@ -8,11 +8,12 @@ datasets/
 │   ├── train/
 │   │   ├── im/          # 0001.jpg  (images)
 │   │   ├── gt/          # 0001.png  (binary mask, 0 / 255)
-│   │   └── gt_edge/     # 0001.png  (synthetic stroke, created by preprocessing)
+│   │   ├── gt_edge/     # 0001.png  (clean edge line, the target)
+│   │   └── gt_brush/    # 0001.png  (rough brush stroke, the 4th input channel)
 │   ├── val/
-│   │   ├── im/  gt/  gt_edge/
+│   │   ├── im/  gt/  gt_edge/  gt_brush/
 │   ├── test/
-│   │   ├── im/  gt/  gt_edge/
+│   │   ├── im/  gt/  gt_edge/  gt_brush/
 │   └── meta.json        # written by preprocessing: counts and rejections
 ├── _raw/                # untouched sources (gitignored)
 └── _qa/                 # contact sheets and reports (gitignored)
@@ -22,16 +23,33 @@ datasets/
 and no automatic splitting — if a near-duplicate sits in both `train/` and
 `test/`, nothing will catch it for you.
 
+## What the generated folders mean
+
+| Folder | Content | Role |
+|---|---|---|
+| `gt_edge/` | the mask boundary drawn as a line, constant width, no jitter | what the model predicts |
+| `gt_brush/` | the same boundary drawn as a rough stroke: simplified, wobbling, variable width | what the model receives |
+
+Both cover the whole object — outer boundary and holes — so the input and the
+target describe the same boundary. The brush is imprecise, not partial: it
+wanders by up to 12 px and is several pixels wide, and only about 30% of its own
+pixels land on the edge. `tools/verify_alignment.py` reports both numbers
+(`edge-covered-by-brush`, `brush-on-edge`).
+
+Both are derived from `gt/` only, never authored by hand. Either may be missing:
+the trainer regenerates the brush for training samples anyway, and falls back to
+generating it for validation when the file is absent.
+
 ## The alignment contract
 
 For every sample:
 
 ```
-im.shape[:2] == gt.shape[:2] == gt_edge.shape[:2]
+im.shape[:2] == gt.shape[:2] == gt_edge.shape[:2] == gt_brush.shape[:2]
 ```
 
-All three are produced from a single resize call during preprocessing, so they
-cannot drift. Never resize one without the other two.
+All four are produced from a single resize call during preprocessing, so they
+cannot drift. Never resize one without the others.
 `tools/verify_alignment.py` enforces this and writes a visual contact sheet.
 
 ## Canonical resolution
@@ -65,6 +83,12 @@ python tools/verify_alignment.py --dataset datasets/mything_prepared
 
 Preprocessing is non-destructive by default. `--inplace` rewrites the source
 folder and prints a warning; use `--backup` to keep a copy under `_original/`.
+To regenerate the two generated rasters on a prepared dataset without touching
+`im/` or `gt/`:
+
+```bash
+python -m training.prepare.preprocess --dataset datasets/mything_prepared --inplace --force
+```
 
 ## File naming
 
@@ -75,8 +99,9 @@ folder and prints a warning; use `--backup` to keep a copy under `_original/`.
 
 ## What is gitignored
 
-`_raw/`, `_qa/`, and the pixel folders of every dataset. The pixels are
-reproducible from the source archive plus the config, and committing them would
-bloat the repository and, for most datasets, violate the licence.
+`_raw/`, `_qa/`, and the pixel folders of every dataset (`im/`, `gt/`, `gt_edge/`,
+`gt_brush/`). The pixels are reproducible from the source archive plus the config,
+and committing them would bloat the repository and, for most datasets, violate
+the licence.
 
 Commit this file. If you ship a demo, commit the demo subset and its `meta.json`.

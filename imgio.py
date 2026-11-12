@@ -6,6 +6,7 @@ Every image read or write in this project goes through this module instead.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import cv2
@@ -82,7 +83,25 @@ def imwrite(path: str | Path, image: np.ndarray) -> None:
 
     tmp = path.with_name(path.name + ".tmp")
     buf.tofile(str(tmp))
-    tmp.replace(path)
+    _replace_with_retry(tmp, path)
+
+
+def _replace_with_retry(source: Path, target: Path, attempts: int = 5) -> None:
+    """``os.replace``, retried briefly.
+
+    On Windows a reader (indexer, thumbnailer, editor preview) holding the
+    destination open makes the rename fail with "access denied" for a few
+    milliseconds. Retrying is the difference between a preprocessing run that
+    finishes and one that dies on image 9 of 3000.
+    """
+    for attempt in range(attempts):
+        try:
+            source.replace(target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def resize(

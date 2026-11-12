@@ -7,7 +7,7 @@ entry point. ``model/`` holds weights only.
 Modules
 -------
 unet.py         BAMUNet and build_model(); self-contained, no config import
-stroke_synth.py synthetic user-stroke generation from a binary mask
+stroke_synth.py clean edge targets and synthetic brush strokes from a mask
 sampler.py      crop sampling mixture (boundary / near / empty / dense)
 dataset.py      torch Dataset, joint geometric and photometric augmentation
 losses.py       BCE + soft Dice + L1

@@ -1,7 +1,7 @@
 """Visualise training crops.
 
-Produces a contact sheet per sample:
-    [ rgb crop ] [ stroke channel ] [ target band over rgb ]
+Produces one row per sample:
+    [ rgb crop ] [ brush channel ] [ clean edge target over rgb ]
 
     python tools/visualize_crops.py --count 8
     python tools/visualize_crops.py --index 3 --out datasets/_qa/crops
@@ -67,12 +67,12 @@ def main(argv: list[str] | None = None) -> int:
     for index in indices:
         item = dataset[index]
         rgb = denormalise(item["image"].numpy(), RGB_MEAN, RGB_STD)
-        stroke = item["image"][3].numpy()
+        brush = item["image"][3].numpy()
         target = item["target"][0].numpy()
 
-        stroke_vis = np.zeros((*stroke.shape, 3), np.uint8)
-        stroke_vis[..., 2] = np.clip(stroke * 255, 0, 255).astype(np.uint8)
-        stroke_vis[..., 1] = (np.clip(stroke, 0, 1) * 140).astype(np.uint8)
+        brush_vis = np.zeros((*brush.shape, 3), np.uint8)
+        brush_vis[..., 2] = np.clip(brush * 255, 0, 255).astype(np.uint8)
+        brush_vis[..., 1] = (np.clip(brush, 0, 1) * 140).astype(np.uint8)
 
         overlay = rgb.astype(np.float32).copy()
         heat = np.clip(target, 0, 1)[..., None]
@@ -82,8 +82,8 @@ def main(argv: list[str] | None = None) -> int:
         row = np.hstack(
             [
                 _panel(_to_bgr(rgb), f"rgb #{index}"),
-                _panel(stroke_vis, "stroke channel"),
-                _panel(_to_bgr(overlay), "target band"),
+                _panel(brush_vis, "brush channel"),
+                _panel(_to_bgr(overlay), "edge target"),
             ]
         )
         panels.append(row)

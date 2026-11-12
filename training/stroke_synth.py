@@ -1,13 +1,32 @@
-"""Synthetic user-stroke generation.
+"""Synthetic brush strokes and clean edge targets.
 
-Given a binary ground-truth mask, produce a raster that looks like a human
-dragging a brush roughly along the object boundary: simplified, smoothed,
-wobbling, partially covering, with a variable brush radius and occasional
-mistakes (wrong side, distractor stroke, interior scribble).
+Every binary mask yields two rasters:
+
+``gt_brush``
+    What a person dragging a brush along the boundary produces: simplified,
+    smoothed, wobbling, variable width, and several pixels thick. This is the
+    model's 4th input channel.
+
+``gt_edge``
+    The clean boundary line of the same object, produced by the same contour
+    walk and the same rasteriser with every source of imprecision removed: full
+    perimeter coverage, no simplification, no smoothing, no normal-direction
+    displacement, constant radius. This is what the model has to predict.
+
+Both cover the same boundary — every contour, holes included — so the input and
+the target always describe the same thing. The brush is *imprecise*, not
+*partial*: it wanders by up to ``max_offset`` px and only a minority of its
+pixels land on the edge, which is what keeps the task from being a copy of the
+input channel.
+
+``BrushParams`` still carries the knobs that make a stroke deliberately
+incomplete (``coverage`` below 1, ``p_partial``, ``p_two_arcs``, ``p_no_brush``,
+``p_distractor``, ``p_interior``, ``p_dry_brush``). They all default to off; turn
+them on only if you want a model that also copes with half-drawn strokes.
 
 This module is deliberately dependency-light: NumPy + OpenCV only. It is used
-both offline (to write ``gt_edge/``) and online (to regenerate a fresh variant
-per training sample).
+both offline (to write ``gt_edge/`` and ``gt_brush/``) and online (to regenerate
+a fresh brush variant per training sample).
 
 All lengths are in canonical pixels (short side 640 unless configured otherwise).
 """
@@ -25,36 +44,38 @@ import numpy as np
 
 
 @dataclass
-class StrokeParams:
+class BrushParams:
     radius_min: float = 1.5
     radius_max: float = 6.0
     jitter_sigma: float = 3.0
     wobble_amp: tuple = (1.0, 4.0)
     wobble_len: tuple = (20.0, 180.0)
-    coverage: tuple = (0.45, 1.00)
+    coverage: tuple = (1.00, 1.00)
     simplify_eps: tuple = (2.0, 10.0)
     smooth_window: tuple = (5, 21)
     max_offset: float = 12.0
-    p_no_stroke: float = 0.08
-    p_distractor: float = 0.15
-    p_interior: float = 0.05
-    p_partial: float = 0.15
-    p_two_arcs: float = 0.15
-    p_dry_brush: float = 0.15
+    # Off by default: each of these deliberately makes the brush describe less
+    # than the edge, which would leave the input and the target misaligned.
+    p_no_brush: float = 0.0
+    p_distractor: float = 0.0
+    p_interior: float = 0.0
+    p_partial: float = 0.0
+    p_two_arcs: float = 0.0
+    p_dry_brush: float = 0.0
 
-    # Config field -> StrokeParams field. Kept explicit so the flat config can
-    # use readable names (stroke_radius_min) without renaming the dataclass.
+    # Config field -> BrushParams field. Kept explicit so the flat config can
+    # use readable names (brush_radius_min) without renaming the dataclass.
     _CONFIG_MAP = {
-        "stroke_radius_min": "radius_min",
-        "stroke_radius_max": "radius_max",
-        "stroke_jitter": "jitter_sigma",
-        "stroke_wobble_amp": "wobble_amp",
-        "stroke_wobble_len": "wobble_len",
-        "stroke_coverage": "coverage",
-        "stroke_simplify": "simplify_eps",
-        "stroke_smooth": "smooth_window",
-        "stroke_max_offset": "max_offset",
-        "p_no_stroke": "p_no_stroke",
+        "brush_radius_min": "radius_min",
+        "brush_radius_max": "radius_max",
+        "brush_jitter": "jitter_sigma",
+        "brush_wobble_amp": "wobble_amp",
+        "brush_wobble_len": "wobble_len",
+        "brush_coverage": "coverage",
+        "brush_simplify": "simplify_eps",
+        "brush_smooth": "smooth_window",
+        "brush_max_offset": "max_offset",
+        "p_no_brush": "p_no_brush",
         "p_distractor": "p_distractor",
         "p_interior": "p_interior",
         "p_partial": "p_partial",
@@ -63,7 +84,7 @@ class StrokeParams:
     }
 
     @classmethod
-    def from_config(cls, cfg) -> "StrokeParams":
+    def from_config(cls, cfg) -> "BrushParams":
         """Build from a Config (flat fields) or any object with those names."""
         if cfg is None:
             return cls()
@@ -108,25 +129,62 @@ def boundary_from_mask(mask: np.ndarray, thickness: int = 1) -> np.ndarray:
     return out
 
 
-def boundary_band(mask: np.ndarray, sigma: float = 1.0) -> np.ndarray:
-    """Soft training target: a blurred boundary normalised to peak 1.0."""
-    edge = boundary_from_mask(mask).astype(np.float32) / 255.0
-    if edge.max() <= 0:
-        return edge
-    band = cv2.GaussianBlur(edge, (0, 0), max(float(sigma), 1e-3))
+def clean_edge(
+    mask: np.ndarray,
+    radius: float = 1.0,
+    min_length: float = 32.0,
+) -> np.ndarray:
+    """The clean boundary line of a mask: ``gt_edge``.
+
+    The same construction as a synthetic brush stroke, minus every source of
+    imprecision: the full perimeter is covered, nothing is simplified or
+    smoothed, nothing is displaced along the normal, and the radius is constant.
+    What remains is the object boundary drawn as a line.
+
+    Deterministic: no RNG is involved, so the same mask always yields the same
+    raster. That is what makes it usable as a training target.
+    """
+    binary = ensure_binary(mask)
+    out = np.zeros_like(binary)
+    thickness = max(1, int(round(2.0 * float(radius))))
+    for path in mask_to_paths(binary, min_length=min_length):
+        points = np.round(path).astype(np.int32).reshape(-1, 1, 2)
+        cv2.polylines(out, [points], True, 255, thickness, lineType=cv2.LINE_AA)
+    return out
+
+
+def edge_band(edge: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+    """Soft training target: a blurred edge line normalised to peak 1.0.
+
+    A 1-px line is 1-3% positive pixels and a 1-px miss is a total loss. The
+    band keeps the peak exactly on the edge while giving a graded penalty
+    nearby, which is what makes the target trainable under class imbalance.
+    """
+    arr = np.asarray(edge)
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    line = (arr >= 128).astype(np.float32)
+    if line.max() <= 0:
+        return line
+    band = cv2.GaussianBlur(line, (0, 0), max(float(sigma), 1e-3))
     peak = float(band.max())
     if peak > 1e-6:
         band = band / peak
     return np.clip(band, 0.0, 1.0).astype(np.float32)
 
 
-def stroke_distance(stroke: np.ndarray, clip_px: float = 16.0) -> np.ndarray:
-    """Distance-to-stroke ramp in [0, 1]: 1 on the stroke, 0 beyond ``clip_px``.
+def boundary_band(mask: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+    """Soft band around the clean edge of ``mask``; the model's target."""
+    return edge_band(clean_edge(mask), sigma=sigma)
 
-    Used when ``data.stroke_encoding == "sdf"``. A brush stroke is a curve, not
-    a closed region, so this is an unsigned distance rather than a signed one.
+
+def brush_distance(brush: np.ndarray, clip_px: float = 16.0) -> np.ndarray:
+    """Distance-to-brush ramp in [0, 1]: 1 on the brush, 0 beyond ``clip_px``.
+
+    Used when ``brush_encoding == "sdf"``. A brush stroke is a curve, not a
+    closed region, so this is an unsigned distance rather than a signed one.
     """
-    binary = ensure_binary(stroke)
+    binary = ensure_binary(brush)
     dist = cv2.distanceTransform(255 - binary, cv2.DIST_L2, 5)
     ramp = 1.0 - np.clip(dist / max(clip_px, 1e-3), 0.0, 1.0)
     return ramp.astype(np.float32)
@@ -248,7 +306,7 @@ def _fractal_noise(n: int, rng: np.random.Generator, octaves: int = 3) -> np.nda
 def deform_polyline(
     pts: np.ndarray,
     rng: np.random.Generator,
-    params: StrokeParams,
+    params: BrushParams,
     normals: np.ndarray | None = None,
 ) -> np.ndarray:
     """Displace along the local normal: global offset + multi-scale wobble."""
@@ -307,7 +365,7 @@ def _arc_slices(
 
 
 def _radii_profile(
-    n: int, rng: np.random.Generator, params: StrokeParams
+    n: int, rng: np.random.Generator, params: BrushParams
 ) -> np.ndarray:
     base = rng.uniform(params.radius_min, params.radius_max)
     period = rng.uniform(18.0, 55.0)
@@ -323,6 +381,7 @@ def rasterize_polyline(
     radii: np.ndarray,
     rng: np.random.Generator | None = None,
     dry_brush_p: float = 0.0,
+    line_type: int = cv2.LINE_AA,
 ) -> np.ndarray:
     """Draw a variable-width anti-aliased stroke onto a uint8 canvas."""
     canvas = np.zeros(shape, np.uint8)
@@ -347,19 +406,19 @@ def rasterize_polyline(
         p0 = (int(round(float(pts[i, 0]))), int(round(float(pts[i, 1]))))
         p1 = (int(round(float(pts[i + 1, 0]))), int(round(float(pts[i + 1, 1]))))
         thickness = int(max(1, round(float(radii[i]) * 2.0)))
-        cv2.line(canvas, p0, p1, 255, thickness, lineType=cv2.LINE_AA)
+        cv2.line(canvas, p0, p1, 255, thickness, lineType=line_type)
         cv2.circle(
             canvas,
             p0,
             int(max(1, round(float(radii[i])))),
             255,
             -1,
-            lineType=cv2.LINE_AA,
+            lineType=line_type,
         )
 
     last = (int(round(float(pts[-1, 0]))), int(round(float(pts[-1, 1]))))
     cv2.circle(
-        canvas, last, int(max(1, round(float(radii[-1])))), 255, -1, cv2.LINE_AA
+        canvas, last, int(max(1, round(float(radii[-1])))), 255, -1, line_type
     )
     return canvas
 
@@ -373,7 +432,7 @@ def _distractor_stroke(
     rgb: np.ndarray,
     boundary: np.ndarray,
     rng: np.random.Generator,
-    params: StrokeParams,
+    params: BrushParams,
 ) -> np.ndarray | None:
     """A stroke along a strong image gradient that is *not* the object edge."""
     if rgb is None:
@@ -420,7 +479,7 @@ def _distractor_stroke(
 
 
 def _interior_stroke(
-    mask: np.ndarray, rng: np.random.Generator, params: StrokeParams
+    mask: np.ndarray, rng: np.random.Generator, params: BrushParams
 ) -> np.ndarray | None:
     binary = ensure_binary(mask)
     eroded = cv2.erode(binary, np.ones((9, 9), np.uint8))
@@ -449,17 +508,24 @@ def _interior_stroke(
 # --------------------------------------------------------------------------- #
 
 
-def synthesize_stroke(
+def synthesize_brush(
     mask: np.ndarray,
     rgb: np.ndarray | None = None,
-    params: StrokeParams | None = None,
+    params: BrushParams | None = None,
     rng: np.random.Generator | int | None = None,
 ) -> np.ndarray:
-    """Generate one synthetic user stroke for a binary mask.
+    """Generate one synthetic brush stroke for a binary mask.
 
-    Returns a uint8 raster (0-255) the same size as ``mask``.
+    Returns a uint8 raster (0-255) the same size as ``mask``. This is the
+    ``gt_brush`` artefact and the model's 4th input channel.
+
+    Every contour is stroked end to end, so the brush covers the same boundary
+    that :func:`clean_edge` draws. It is imprecise — simplified, smoothed,
+    displaced along the normal, variable width — but it is not *partial*: an
+    input that described only part of the object while the target described all
+    of it would be asking the model to invent the rest.
     """
-    params = params or StrokeParams()
+    params = params or BrushParams()
     if isinstance(rng, np.random.Generator):
         gen = rng
     else:
@@ -469,29 +535,13 @@ def synthesize_stroke(
     h, w = binary.shape
     out = np.zeros((h, w), np.uint8)
 
-    if gen.random() < params.p_no_stroke:
+    if gen.random() < params.p_no_brush:
         return out
 
     paths = mask_to_paths(binary)
     if not paths:
         return out
 
-    # Weight path choice by perimeter so large objects dominate, as in reality.
-    lengths = np.array([polyline_length(p, closed=True) for p in paths], np.float64)
-    probs = lengths / lengths.sum()
-    path = paths[int(gen.choice(len(paths), p=probs))]
-
-    # Rotate the start point so the contour seam never sits at a fixed place.
-    path = np.roll(path, int(gen.integers(0, path.shape[0])), axis=0)
-
-    closed = np.vstack([path, path[:1]])
-    resampled = resample_polyline(closed, step=6.0)
-    if resampled.shape[0] < 8:
-        return out
-    # Drop the duplicated closing point so arc wrapping behaves.
-    resampled = resampled[:-1]
-
-    n = resampled.shape[0]
     lo, hi = params.coverage
     coverage = float(gen.uniform(lo, hi))
     if gen.random() < params.p_partial:
@@ -503,21 +553,38 @@ def synthesize_stroke(
     eps = float(gen.uniform(*params.simplify_eps))
     window = int(gen.integers(params.smooth_window[0], params.smooth_window[1] + 1))
 
-    for idx in _arc_slices(n, coverage, n_arcs, gen):
-        arc = resampled[idx]
-        if arc.shape[0] < 4:
-            continue
-        arc = simplify_polyline(arc, eps)
-        arc = resample_polyline(arc, step=6.0)
-        if arc.shape[0] < 3:
-            continue
-        arc = smooth_polyline(arc, window)
-        arc = deform_polyline(arc, gen, params)
+    for path in paths:
+        # Rotate the start point so the contour seam never sits at a fixed place.
+        path = np.roll(path, int(gen.integers(0, path.shape[0])), axis=0)
 
-        radii = _radii_profile(arc.shape[0], gen, params)
-        dry = params.p_dry_brush if gen.random() < 0.5 else 0.0
-        layer = rasterize_polyline((h, w), arc, radii, rng=gen, dry_brush_p=dry)
-        out = np.maximum(out, layer)
+        closed = np.vstack([path, path[:1]])
+        resampled = resample_polyline(closed, step=6.0)
+        if resampled.shape[0] < 8:
+            continue
+        # Drop the duplicated closing point so arc wrapping behaves.
+        resampled = resampled[:-1]
+
+        n = resampled.shape[0]
+        for idx in _arc_slices(n, coverage, n_arcs, gen):
+            arc = resampled[idx]
+            if arc.shape[0] < 4:
+                continue
+            arc = simplify_polyline(arc, eps)
+            arc = resample_polyline(arc, step=6.0)
+            if arc.shape[0] < 3:
+                continue
+            arc = smooth_polyline(arc, window)
+            arc = deform_polyline(arc, gen, params)
+            if len(idx) == n:
+                # Full ring: close the polyline so the rasteriser draws the last
+                # segment and the loop has no seam gap. Deformation is smooth,
+                # so the closing segment stays short.
+                arc = np.vstack([arc, arc[:1]])
+
+            radii = _radii_profile(arc.shape[0], gen, params)
+            dry = params.p_dry_brush if gen.random() < 0.5 else 0.0
+            layer = rasterize_polyline((h, w), arc, radii, rng=gen, dry_brush_p=dry)
+            out = np.maximum(out, layer)
 
     if gen.random() < params.p_distractor:
         layer = _distractor_stroke(rgb, boundary_from_mask(binary), gen, params)
@@ -532,21 +599,23 @@ def synthesize_stroke(
     return out
 
 
-def encode_stroke(stroke: np.ndarray, encoding: str = "binary", clip_px: float = 16.0):
-    """Convert a stroke raster to the model's 4th channel."""
+def encode_brush(brush: np.ndarray, encoding: str = "binary", clip_px: float = 16.0):
+    """Convert a brush raster to the model's 4th channel."""
     if encoding == "sdf":
-        return stroke_distance(stroke, clip_px=clip_px)
+        return brush_distance(brush, clip_px=clip_px)
     if encoding != "binary":
-        raise ValueError(f"unknown stroke encoding: {encoding}")
-    return (ensure_binary(stroke).astype(np.float32) / 255.0)
+        raise ValueError(f"unknown brush encoding: {encoding}")
+    return (ensure_binary(brush).astype(np.float32) / 255.0)
 
 
 __all__ = [
-    "StrokeParams",
+    "BrushParams",
     "ensure_binary",
     "boundary_from_mask",
+    "clean_edge",
+    "edge_band",
     "boundary_band",
-    "stroke_distance",
+    "brush_distance",
     "fill_holes",
     "mask_to_paths",
     "polyline_length",
@@ -556,6 +625,6 @@ __all__ = [
     "polyline_normals",
     "deform_polyline",
     "rasterize_polyline",
-    "synthesize_stroke",
-    "encode_stroke",
+    "synthesize_brush",
+    "encode_brush",
 ]

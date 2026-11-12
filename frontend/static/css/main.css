@@ -184,6 +184,42 @@
   color: var(--muted);
 }
 
+/* The pending line's decision bar. Sits at the top so it never covers the
+   stroke the user is judging at the bottom of the object. */
+.proposal-bar {
+  position: absolute;
+  left: 50%;
+  top: 16px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 12px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  box-shadow: var(--shadow-lg);
+  font-size: 12px;
+  max-width: min(90%, 720px);
+}
+
+.proposal-bar[hidden] {
+  display: none;
+}
+
+.proposal-bar__label {
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-right: 4px;
+}
+
+.proposal-bar .btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ---------------------------------------------------------------- inspector */
 
 .inspector {
@@ -207,6 +243,13 @@
   text-transform: uppercase;
   color: var(--faint);
   margin-bottom: 10px;
+}
+
+.panel__note {
+  margin: -4px 0 12px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
 }
 
 /* --------------------------------------------------------------- status bar */

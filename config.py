@@ -62,28 +62,32 @@ class Config:
 
     # ------------------------------------------------------------- resolution
     short_side: int = 640                     # images are downscaled to this short side
-    crop_size: int = 256                      # training and inference crop
-    crop_stride: int = 128                    # spacing between crops along a stroke
-    target_sigma: float = 1.0                 # width of the soft boundary target
+    crop_size: int = 256                      # training crop, and the largest inference crop
+    crop_min: int = 64                        # smallest inference crop
+    crop_ratio: float = 0.4                   # inference crop / canvas short side
+    crop_stride: int = 128                    # spacing between crops along a brush stroke
+    target_sigma: float = 1.0                 # width of the soft edge target
     num_workers: int = 8                      # dataloader workers
 
-    # ------------------------------------------------------------ stroke synth
-    stroke_radius_min: float = 1.5            # brush radius range, canonical px
-    stroke_radius_max: float = 6.0
-    stroke_jitter: float = 2.0                # global offset sigma
-    stroke_wobble_amp: tuple = (0.5, 2.0)     # wobble amplitude range
-    stroke_wobble_len: tuple = (60.0, 260.0)  # wobble wavelength range
-    stroke_coverage: tuple = (0.45, 1.00)     # fraction of the contour stroked
-    stroke_simplify: tuple = (6.0, 16.0)      # RDP epsilon range
-    stroke_smooth: tuple = (15, 31)            # smoothing window range
-    stroke_max_offset: float = 12.0           # displacement clip, px
-    stroke_encoding: str = "binary"           # binary | sdf
-    p_no_stroke: float = 0.08
-    p_distractor: float = 0.15
-    p_interior: float = 0.05
-    p_partial: float = 0.15
-    p_two_arcs: float = 0.15
-    p_dry_brush: float = 0.15
+    # -------------------------------------------------------- brush synthesis
+    brush_radius_min: float = 1.5             # brush radius range, canonical px
+    brush_radius_max: float = 6.0
+    brush_jitter: float = 2.0                 # global offset sigma
+    brush_wobble_amp: tuple = (0.5, 2.0)      # wobble amplitude range
+    brush_wobble_len: tuple = (60.0, 260.0)   # wobble wavelength range
+    brush_coverage: tuple = (1.00, 1.00)      # fraction of each contour covered
+    brush_simplify: tuple = (6.0, 16.0)       # RDP epsilon range
+    brush_smooth: tuple = (15, 31)            # smoothing window range
+    brush_max_offset: float = 12.0            # displacement clip, px
+    brush_encoding: str = "binary"            # binary | sdf
+    # Off by default: these make the brush cover less than the edge, which would
+    # leave the 4th channel and the target describing different things.
+    p_no_brush: float = 0.0
+    p_distractor: float = 0.0
+    p_interior: float = 0.0
+    p_partial: float = 0.0
+    p_two_arcs: float = 0.0
+    p_dry_brush: float = 0.0
 
     # ------------------------------------------------------------ crop mixture
     mix_boundary: float = 0.50
@@ -125,7 +129,9 @@ class Config:
     sensitivity: float = 1.0
     expand: int = 0
     smooth: int = 2
-    mode: str = "object"                      # object | line
+    mode: str = "line"                        # line = predict the edge, object = also fill
+    line_width: int = 3                       # predicted line thickness, canvas px
+    fill_close: int = 5                       # px of gap bridged before filling a line
     merge_weighting: str = "uniform"          # uniform | gaussian
     apply_dbscan: bool = False
     apply_morphology: bool = True
@@ -179,6 +185,23 @@ class Config:
     @property
     def runs_root(self) -> Path:
         return self.path(self.runs_dir)
+
+    # --------------------------------------------------------------- geometry
+
+    def crop_for(self, height: int, width: int) -> int:
+        """Inference crop size for an image of this size.
+
+        ``crop_size`` is 40% of the canonical 640 short side, which is what
+        makes a crop a *local* view of the boundary rather than a picture of the
+        whole object. Scaling the crop with the canvas keeps that ratio, so a
+        small upload is not handed a crop that contains everything. The result
+        is clamped to ``[crop_min, crop_size]`` and snapped to a multiple of 32
+        so the UNet's four pooling stages stay exact.
+        """
+        short = max(1, min(int(height), int(width)))
+        raw = int(round(short * float(self.crop_ratio)))
+        raw = max(int(self.crop_min), min(int(self.crop_size), raw))
+        return max(32, (raw // 32) * 32)
 
     # ------------------------------------------------------------ serialisation
 
@@ -247,12 +270,16 @@ class Config:
             raise ValueError("short_side must be >= 256")
         if self.crop_size % 32 != 0:
             raise ValueError("crop_size must be a multiple of 32")
+        if self.crop_min % 32 != 0 or not 32 <= self.crop_min <= self.crop_size:
+            raise ValueError("crop_min must be a multiple of 32 in [32, crop_size]")
+        if not 0.05 <= self.crop_ratio <= 1.0:
+            raise ValueError("crop_ratio must be in (0.05, 1.0]")
         if not 0 < self.crop_stride <= self.crop_size:
             raise ValueError("crop_stride must be in (0, crop_size]")
-        if self.stroke_encoding not in ("binary", "sdf"):
-            raise ValueError("stroke_encoding must be 'binary' or 'sdf'")
-        if self.stroke_radius_min <= 0 or self.stroke_radius_max < self.stroke_radius_min:
-            raise ValueError("stroke radius range is invalid")
+        if self.brush_encoding not in ("binary", "sdf"):
+            raise ValueError("brush_encoding must be 'binary' or 'sdf'")
+        if self.brush_radius_min <= 0 or self.brush_radius_max < self.brush_radius_min:
+            raise ValueError("brush radius range is invalid")
 
         mix_total = self.mix_boundary + self.mix_near + self.mix_empty + self.mix_dense
         if abs(mix_total - 1.0) > 1e-6:
@@ -276,6 +303,10 @@ class Config:
             raise ValueError("backend is invalid")
         if self.mode not in ("object", "line"):
             raise ValueError("mode must be 'object' or 'line'")
+        if not 1 <= self.line_width <= self.crop_size:
+            raise ValueError("line_width must be in [1, crop_size]")
+        if not 0 <= self.fill_close <= 16:
+            raise ValueError("fill_close must be in [0, 16]")
         if self.merge_weighting not in ("uniform", "gaussian"):
             raise ValueError("merge_weighting must be 'uniform' or 'gaussian'")
         if not 1 <= self.max_crops <= 256:

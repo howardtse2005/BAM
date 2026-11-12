@@ -1,9 +1,10 @@
 /**
  * Canvas editor.
  *
- * Layer order (bottom to top): image, stroke trail, mask preview, mask data.
+ * Layer order (bottom to top): image, stroke trail, mask preview, proposal.
  * The mask data canvas is invisible; it is the source of truth and is what gets
- * saved. The preview canvas is a tinted, contoured view of it.
+ * saved. The preview canvas is a tinted, contoured view of it. The proposal
+ * canvas holds a predicted edge line that has not been accepted yet.
  *
  * All pointer coordinates go through `screenToImage`, which uses the image
  * canvas's bounding rect. That automatically accounts for the wrapper's
@@ -11,9 +12,12 @@
  */
 
 import { imageUrl, loadImage } from "./file_system.js";
-import { CropCollector, sendSegment } from "./magic_pen.js";
+import { CropCollector, sendFill, sendSegment } from "./magic_brush.js";
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+
+/** Stage children that are controls, not canvas surface. */
+const STAGE_OVERLAYS = ".proposal-bar, .stage__progress, .stage__hint, .stage__empty";
 
 export class EditorCanvas {
   constructor(options) {
@@ -34,9 +38,14 @@ export class EditorCanvas {
     this.split = options.split || "train";
     this.imageName = options.image || "";
     this.cropSize = options.cropSize || 256;
+    this.cropMin = options.cropMin || 64;
+    this.cropMax = options.cropMax || this.cropSize;
+    this.cropRatio = options.cropRatio || 0.4;
     this.shortSide = options.shortSide || 640;
     this.stride = options.stride || 128;
     this.maxCrops = options.maxCrops || 64;
+    this.lineWidth = options.lineWidth || 3;
+    this.fillClose = options.fillClose || 5;
 
     this.width = 0;
     this.height = 0;
@@ -78,6 +87,12 @@ export class EditorCanvas {
     this.edgeCanvas = document.createElement("canvas");
     this.edgeCtx = this.edgeCanvas.getContext("2d");
     this.edgeReady = false;
+    this.proposalCanvas = document.createElement("canvas");
+    this.proposalCtx = this.proposalCanvas.getContext("2d", {
+      willReadFrequently: true,
+    });
+    this.proposalReady = false;
+    this.proposalMeta = null;
 
     this.previewQueued = false;
 
@@ -97,6 +112,7 @@ export class EditorCanvas {
     this.fillColor = (styles.getPropertyValue("--mask-fill") || "#4f46e5").trim();
     this.rimColor = (styles.getPropertyValue("--mask-rim") || "#312a96").trim();
     this.strokeColor = (styles.getPropertyValue("--stroke") || "#f59e0b").trim();
+    this.accentColor = (styles.getPropertyValue("--accent") || "#4f46e5").trim();
   }
 
   refreshTheme() {
@@ -157,6 +173,7 @@ export class EditorCanvas {
       this.tint,
       this.rim,
       this.edgeCanvas,
+      this.proposalCanvas,
     ]) {
       canvas.width = this.width;
       canvas.height = this.height;
@@ -170,6 +187,8 @@ export class EditorCanvas {
     // preview tint and the saved PNG agree.
     this.maskCtx.clearRect(0, 0, this.width, this.height);
     this.edgeReady = false;
+    this.proposalReady = false;
+    this.proposalMeta = null;
     this.maskNonEmpty = false;
   }
 
@@ -289,7 +308,18 @@ export class EditorCanvas {
     if (event.button === 2) return;
     if (!this.width) return;
 
-    this.stage.setPointerCapture(event.pointerId);
+    // The proposal bar and the progress pill are children of the stage, so
+    // their clicks would otherwise start a stroke underneath the button the
+    // user just pressed.
+    if (event.target instanceof Element && event.target.closest(STAGE_OVERLAYS)) {
+      return;
+    }
+
+    try {
+      this.stage.setPointerCapture(event.pointerId);
+    } catch {
+      /* the pointer can already be gone on a fast tap; capture is an optimisation */
+    }
     this.lastClient = { x: event.clientX, y: event.clientY };
 
     if (this._isPan(event)) {
@@ -307,14 +337,14 @@ export class EditorCanvas {
     if (!point) return;
     const [x, y] = point;
 
-    if (this.tool === "magic") {
+    if (this.tool === "magicBrush") {
       this.subtract = event.altKey;
       this._magicStart(x, y);
       return;
     }
 
     if (this.tool === "fill") {
-      this.fillHoles();
+      this.fillMask();
       return;
     }
 
@@ -342,7 +372,7 @@ export class EditorCanvas {
     const [x, y] = point;
 
     if (this.drawing) this._paint(x, y);
-    else if (this.tool === "magic" && this.magicLast) this._magicDraw(x, y);
+    else if (this.tool === "magicBrush" && this.magicLast) this._magicDraw(x, y);
   }
 
   _up(event) {
@@ -359,7 +389,7 @@ export class EditorCanvas {
       this._status();
       return;
     }
-    if (this.tool === "magic" && this.magicLast) {
+    if (this.tool === "magicBrush" && this.magicLast) {
       this._magicEnd();
     }
   }
@@ -409,13 +439,28 @@ export class EditorCanvas {
     this._queuePreview();
   }
 
-  // ------------------------------------------------------------------ magic
+  // ------------------------------------------------------------ magic brush
+
+  /**
+   * Crop size for this canvas: a fixed fraction of the short side, clamped and
+   * snapped to a multiple of 32. At the canonical 640 short side this is 256;
+   * a 400 px upload gets 160, which keeps the object at the scale the model was
+   * trained on instead of shrinking the object to a dot inside a fixed crop.
+   */
+  computeCropSize() {
+    const short = Math.min(this.width || this.shortSide, this.height || this.shortSide);
+    const raw = Math.round(short * this.cropRatio);
+    const bounded = Math.min(this.cropMax, Math.max(this.cropMin, raw));
+    return Math.max(32, Math.round(bounded / 32) * 32);
+  }
 
   _magicStart(x, y) {
-    this.pushHistory();
+    // A new stroke replaces whatever line was pending. Nothing is committed
+    // until the user accepts, so there is no history entry yet.
+    this.clearProposal(false);
     this.strokeCtx.clearRect(0, 0, this.width, this.height);
     this.strokeDataCtx.clearRect(0, 0, this.width, this.height);
-    this.collector.reset();
+    this.collector.reset(this.computeCropSize());
     this.magicLast = null;
     this._magicDraw(x, y);
   }
@@ -453,11 +498,11 @@ export class EditorCanvas {
     this.magicLast = [x, y];
 
     if (this.collector.add(x, y)) {
-      const half = this.cropSize / 2;
+      const half = this.collector.cropSize / 2;
       visual.save();
       visual.strokeStyle = "rgba(245, 158, 11, 0.28)";
       visual.lineWidth = 1;
-      visual.strokeRect(x - half, y - half, this.cropSize, this.cropSize);
+      visual.strokeRect(x - half, y - half, this.collector.cropSize, this.collector.cropSize);
       visual.restore();
       this._status();
     }
@@ -465,6 +510,7 @@ export class EditorCanvas {
 
   async _magicEnd() {
     const crops = this.collector.crops.slice();
+    const cropSize = this.collector.cropSize;
     this.strokeCtx.clearRect(0, 0, this.width, this.height);
     this.magicLast = null;
     if (!crops.length) return;
@@ -480,11 +526,24 @@ export class EditorCanvas {
         canvas: { width: this.width, height: this.height },
         crops,
         stroke_mask: this.strokeData.toDataURL("image/png"),
-        params: this.getParams ? this.getParams() : {},
+        params: {
+          ...(this.getParams ? this.getParams() : {}),
+          mode: "line",
+          line_width: this.lineWidth,
+          fill_close: this.fillClose,
+        },
       };
       const result = await sendSegment(payload);
-      await this.applyMask(result.mask_base64, { subtract: this.subtract });
-      this.onResult?.({ ...result, elapsed: performance.now() - started, crops: crops.length });
+      const meta = {
+        closed: Boolean(result.closed),
+        confidence: result.confidence,
+        cropSize: result.crop_size || cropSize,
+        elapsed: performance.now() - started,
+        crops: crops.length,
+        stats: result.stats,
+      };
+      await this.setProposal(result.line_base64, meta);
+      this.onProposal?.({ ...result, ...meta });
     } catch (error) {
       this.onError?.(error);
     } finally {
@@ -492,6 +551,67 @@ export class EditorCanvas {
       this.collector.reset();
       this._status();
     }
+  }
+
+  // --------------------------------------------------------------- proposal
+
+  /**
+   * Show a predicted line without committing it.
+   *
+   * The server returns an opaque grayscale PNG, so it is re-read into the same
+   * white-with-alpha convention the mask canvas uses. Drawing it straight in
+   * would paint the black background over the mask.
+   */
+  async setProposal(lineBase64, meta = {}) {
+    if (!lineBase64 || !this.width) return false;
+    const image = await loadImage(lineBase64);
+
+    const temp = document.createElement("canvas");
+    temp.width = this.width;
+    temp.height = this.height;
+    const tempCtx = temp.getContext("2d", { willReadFrequently: true });
+    tempCtx.drawImage(image, 0, 0, this.width, this.height);
+    const source = tempCtx.getImageData(0, 0, this.width, this.height);
+    const data = source.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const on = data[i] > 127;
+      data[i] = 255;
+      data[i + 1] = 255;
+      data[i + 2] = 255;
+      data[i + 3] = on ? 255 : 0;
+    }
+    this.proposalCtx.putImageData(source, 0, 0);
+
+    this.proposalReady = true;
+    this.proposalMeta = meta;
+    this.updatePreview();
+    this._status();
+    return true;
+  }
+
+  clearProposal(notify = true) {
+    this.proposalReady = false;
+    this.proposalMeta = null;
+    if (this.width) this.proposalCtx.clearRect(0, 0, this.width, this.height);
+    this.updatePreview();
+    this._status();
+    if (notify) this.onProposalCleared?.();
+  }
+
+  /** Commit the pending line to the mask. Returns false when there is none. */
+  acceptProposal() {
+    if (!this.proposalReady) return false;
+    this.pushHistory();
+    const ctx = this.maskCtx;
+    ctx.save();
+    ctx.globalCompositeOperation = this.subtract ? "destination-out" : "source-over";
+    ctx.drawImage(this.proposalCanvas, 0, 0);
+    ctx.restore();
+    if (!this.subtract) this.maskNonEmpty = true;
+    this.clearProposal();
+    this.updatePreview();
+    this._status();
+    return true;
   }
 
   // ------------------------------------------------------------------- mask
@@ -561,6 +681,7 @@ export class EditorCanvas {
     this.maskCtx.clearRect(0, 0, this.width, this.height);
     this.maskNonEmpty = false;
     this.edgeReady = false;
+    this.clearProposal(false);
     this.updatePreview();
     this._status();
   }
@@ -583,9 +704,57 @@ export class EditorCanvas {
     this._status();
   }
 
-  /** Fill background regions that are enclosed by the mask. */
+  /**
+   * Segment the region enclosed by the current line.
+   *
+   * Server-side first: it closes hairline gaps, floods the outside, keeps holes
+   * and snaps the boundary to image edges. The local flood is the offline
+   * fallback, so a stopped server degrades instead of breaking the tool.
+   */
+  async fillMask() {
+    if (!this.width) return false;
+
+    if (this.proposalReady) this.acceptProposal();
+    if (!this.maskNonEmpty) {
+      this.onError?.(new Error("Draw or accept a line first"));
+      return false;
+    }
+
+    this.onProgress?.(true, "filling…");
+    try {
+      const payload = {
+        dataset: this.dataset,
+        split: this.split,
+        image: this.imageName,
+        canvas: { width: this.width, height: this.height },
+        line_mask: this.maskCanvas.toDataURL("image/png"),
+        params: {
+          ...(this.getParams ? this.getParams() : {}),
+          fill_close: this.fillClose,
+        },
+      };
+      const result = await sendFill(payload);
+      if (!result.grew) {
+        this.onError?.(
+          new Error("The line does not enclose a region — close the gap and try again")
+        );
+        return false;
+      }
+      await this.applyMask(result.mask_base64, { replace: true });
+      this.onFilled?.(result);
+      return true;
+    } catch (error) {
+      const grew = this.fillHoles();
+      if (!grew) this.onError?.(error);
+      return grew;
+    } finally {
+      this.onProgress?.(false);
+    }
+  }
+
+  /** Fill background regions enclosed by the mask. Returns whether it grew. */
   fillHoles() {
-    if (!this.width) return;
+    if (!this.width) return false;
     this.pushHistory();
     const image = this.maskCtx.getImageData(0, 0, this.width, this.height);
     const data = image.data;
@@ -636,12 +805,13 @@ export class EditorCanvas {
 
     if (!changed) {
       this.history.pop();
-      return;
+      return false;
     }
     this.maskCtx.putImageData(image, 0, 0);
     this.maskNonEmpty = true;
     this.updatePreview();
     this._status();
+    return true;
   }
 
   _drawTint(source, color) {
@@ -688,19 +858,29 @@ export class EditorCanvas {
       ctx.restore();
     }
 
-    if (!this.maskVisible) return;
+    if (this.maskVisible) {
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      ctx.drawImage(this._drawOutline(this.maskCanvas, this.rimColor, 1, 1), 0, 0);
+      ctx.drawImage(this._drawOutline(this.maskCanvas, this.rimColor, -1, -1), 0, 0);
+      ctx.restore();
 
-    ctx.save();
-    ctx.globalAlpha = 0.85;
-    ctx.drawImage(this._drawOutline(this.maskCanvas, this.rimColor, 1, 1), 0, 0);
-    ctx.drawImage(this._drawOutline(this.maskCanvas, this.rimColor, -1, -1), 0, 0);
-    ctx.restore();
+      const fill = this._drawTint(this.maskCanvas, this.fillColor);
+      ctx.save();
+      ctx.globalAlpha = this.maskOpacity;
+      ctx.drawImage(fill, 0, 0);
+      ctx.restore();
+    }
 
-    const fill = this._drawTint(this.maskCanvas, this.fillColor);
-    ctx.save();
-    ctx.globalAlpha = this.maskOpacity;
-    ctx.drawImage(fill, 0, 0);
-    ctx.restore();
+    // The pending line sits on top of everything: it is the thing the user is
+    // being asked to judge, so it must not be hidden by the mask tint.
+    if (this.proposalReady) {
+      const line = this._drawTint(this.proposalCanvas, this.accentColor);
+      ctx.save();
+      ctx.globalAlpha = 0.95;
+      ctx.drawImage(line, 0, 0);
+      ctx.restore();
+    }
   }
 
   _queuePreview() {
@@ -712,7 +892,7 @@ export class EditorCanvas {
     });
   }
 
-  async applyMask(maskBase64, { subtract = false } = {}) {
+  async applyMask(maskBase64, { subtract = false, replace = false } = {}) {
     if (!maskBase64 || !this.width) return;
     const image = await loadImage(maskBase64);
 
@@ -732,7 +912,11 @@ export class EditorCanvas {
       data[i] = 255;
       data[i + 1] = 255;
       data[i + 2] = 255;
-      if (subtract) {
+      if (replace) {
+        // A filled region replaces the outline it was grown from, so the thin
+        // line does not survive as a ring around the object.
+        data[i + 3] = on ? 255 : 0;
+      } else if (subtract) {
         if (on) data[i + 3] = 0;
       } else if (on) {
         data[i + 3] = 255;
@@ -809,7 +993,9 @@ export class EditorCanvas {
     this.onStatus?.({
       zoom: this.zoom,
       crops: this.collector.count,
+      cropSize: this.collector.cropSize,
       hasMask: this.maskNonEmpty,
+      proposal: this.proposalReady,
       tool: this.tool,
     });
   }

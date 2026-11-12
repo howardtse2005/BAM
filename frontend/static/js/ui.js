@@ -26,6 +26,7 @@ export class UI {
     this.bindTopbar();
     this.bindModal();
     this.bindSplit();
+    this.bindProposal();
 
     initTheme(el("theme-toggle"), () => this.canvas.refreshTheme());
 
@@ -38,7 +39,9 @@ export class UI {
     this.settings.applyToCanvas();
     this.canvas.onStatus = (status) => this.updateStatus(status);
     this.canvas.onProgress = (on, text) => this.setProgress(on, text);
-    this.canvas.onResult = (result) => this.onResult(result);
+    this.canvas.onProposal = (result) => this.onProposal(result);
+    this.canvas.onProposalCleared = () => this.hideProposalBar();
+    this.canvas.onFilled = (result) => this.onFilled(result);
     this.canvas.onError = (error) => this.onError(error);
     this.canvas.getParams = () => this.settings.params();
   }
@@ -82,6 +85,12 @@ export class UI {
     });
   }
 
+  bindProposal() {
+    el("btn-accept-line")?.addEventListener("click", () => this.acceptProposal());
+    el("btn-fill-line")?.addEventListener("click", () => this.fillProposal());
+    el("btn-discard-line")?.addEventListener("click", () => this.discardProposal());
+  }
+
   bindSplit() {
     if (!this.splitSelect) return;
     this.splitSelect.value = this.bootstrap.split || "train";
@@ -117,9 +126,10 @@ export class UI {
       button.classList.toggle("is-active", button.dataset.tool === tool);
     });
     const hints = {
-      magic: "Draw a rough loop around the object. Close the loop to get a filled mask.",
+      magicBrush:
+        "Drag roughly along the object edge. Release to see the predicted line, then accept it or re-stroke.",
       pan: "Drag to pan. Wheel to zoom.",
-      fill: "Click to fill enclosed holes in the mask.",
+      fill: "Fill the region enclosed by the accepted line.",
     };
     this.hint(hints[tool] || null);
   }
@@ -194,6 +204,7 @@ export class UI {
       el("image-name").textContent = name;
       document.title = `${name} — BAM`;
       el("stage-empty").hidden = true;
+      this.hideProposalBar();
       this.updateImageInfo();
 
       const mask = await this.fs.mask(name);
@@ -238,6 +249,60 @@ export class UI {
     }
   }
 
+  // -------------------------------------------------------------- proposal
+
+  showProposalBar(meta) {
+    const bar = el("proposal-bar");
+    if (!bar) return;
+    bar.hidden = false;
+
+    const label = el("proposal-label");
+    if (label) {
+      const closed = meta.closed ? "closed loop" : "open line";
+      const crops = meta.crops ? `${meta.crops} crop${meta.crops === 1 ? "" : "s"}` : "";
+      const size = meta.cropSize ? `${meta.cropSize}px` : "";
+      label.textContent = ["Predicted edge", closed, crops, size]
+        .filter(Boolean)
+        .join(" · ");
+    }
+
+    // Filling an open line has no interior to fill, so the action is disabled
+    // rather than offered and then refused.
+    const fillButton = el("btn-fill-line");
+    if (fillButton) {
+      fillButton.disabled = !meta.closed;
+      fillButton.title = meta.closed
+        ? "Fill the region enclosed by this line"
+        : "The line does not enclose a region yet";
+    }
+  }
+
+  hideProposalBar() {
+    const bar = el("proposal-bar");
+    if (bar) bar.hidden = true;
+  }
+
+  acceptProposal() {
+    if (!this.canvas.acceptProposal()) return false;
+    this.hideProposalBar();
+    this.updateImageInfo();
+    return true;
+  }
+
+  discardProposal() {
+    this.canvas.clearProposal();
+    this.hideProposalBar();
+    this.hint("Line discarded. Drag again to re-stroke.");
+  }
+
+  async fillProposal() {
+    if (!this.canvas.proposalReady) return;
+    this.canvas.acceptProposal();
+    this.hideProposalBar();
+    await this.canvas.fillMask();
+    this.updateImageInfo();
+  }
+
   // ----------------------------------------------------------------- status
 
   updateStatus(status) {
@@ -250,6 +315,9 @@ export class UI {
       if (el("s-crops")) el("s-crops").textContent = `${crops} crop${crops === 1 ? "" : "s"}`;
       if (el("i-crops")) el("i-crops").textContent = String(crops);
     }
+    if (el("i-crop-size") && status.cropSize) {
+      el("i-crop-size").textContent = `${status.cropSize} px`;
+    }
     if (el("s-size") && this.canvas.width) {
       el("s-size").textContent = `${this.canvas.width} × ${this.canvas.height}`;
     }
@@ -258,6 +326,9 @@ export class UI {
     }
     if (el("i-mask")) {
       el("i-mask").textContent = status.hasMask ? "edited" : "empty";
+    }
+    if (el("i-line")) {
+      el("i-line").textContent = status.proposal ? "pending" : "none";
     }
   }
 
@@ -280,7 +351,7 @@ export class UI {
     if (text && el("progress-text")) el("progress-text").textContent = text;
   }
 
-  onResult(result) {
+  onProposal(result) {
     const stats = result.stats || {};
     if (el("m-latency")) el("m-latency").textContent = formatMs(stats.ms_total);
     if (el("s-latency")) {
@@ -291,11 +362,19 @@ export class UI {
     if (el("i-crops")) el("i-crops").textContent = String(stats.num_crops || 0);
     this.canvas.setEdge(result.edge_base64);
 
-    if (result.mode_used === "open_loop") {
-      toast("Stroke is not closed — showing the predicted edge. Close the loop to fill.", "warn", 5200);
-    } else if (result.low_confidence) {
-      toast("Low confidence. Try closing the loop or adjusting the edge threshold.", "warn");
+    this.showProposalBar(result);
+    if (!result.closed) {
+      this.hint("The line is open. Accept it as-is, re-stroke, or close the gap to fill.");
     }
+    this.updateImageInfo();
+  }
+
+  onFilled(result) {
+    const stats = result.stats || {};
+    if (el("s-latency")) {
+      el("s-latency").textContent = `${Math.round(stats.ms_fill || 0)} ms fill`;
+    }
+    toast(`Filled ${Number(result.added_px || 0).toLocaleString()} px`, "ok");
     this.updateImageInfo();
   }
 
@@ -318,11 +397,11 @@ export class UI {
     if (!info.available) {
       warning.hidden = false;
       warning.textContent =
-        "No model loaded. Magic pen will fail until a checkpoint exists in model/.";
+        "No model loaded. The magic brush will fail until a checkpoint exists in model/.";
     } else if (info.is_mock) {
       warning.hidden = false;
       warning.textContent =
-        "Placeholder model: no checkpoint found, so the magic pen returns a band around your stroke. Train or drop a .pth into model/ to enable real predictions.";
+        "Placeholder model: no checkpoint found, so the magic brush returns a band around your stroke. Train or drop a .pth into model/ to enable real predictions.";
     } else {
       warning.hidden = true;
     }

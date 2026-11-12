@@ -6,9 +6,17 @@ Layout (see README step 2):
     datasets/<name>/val/im/*.jpg      datasets/<name>/val/gt/*.png
     datasets/<name>/test/im/*.jpg     datasets/<name>/test/gt/*.png
 
-``gt_edge/`` is created next to ``im/`` and ``gt/`` by the preprocessing step and
-is used for deterministic validation strokes. Training regenerates a fresh
-stroke for every sample, so augmentation is effectively unbounded.
+Each sample is a crop of the image plus a synthetic brush stroke, and the target
+is the clean edge of the object inside that crop:
+
+    input   RGB + gt_brush   (4 channels)
+    target  gt_edge          (soft band)
+
+``gt_brush`` and ``gt_edge`` are written next to ``im/`` and ``gt/`` by the
+preprocessing step. Training regenerates a fresh brush stroke for every sample,
+so augmentation is effectively unbounded; validation uses the stored one so
+scores are comparable across runs. The edge target is always derived from the
+crop's own mask, which keeps it pixel-aligned through every geometric transform.
 
 There is no manifest: the folder structure is the manifest. Splits are whatever
 the user put in ``train/``, ``val/`` and ``test/``.
@@ -31,11 +39,11 @@ from imgio import imread_gray, imread_rgb, to_binary_mask
 from .paths import SPLITS, pair_split, split_counts
 from .sampler import CropBox, CropSampler
 from .stroke_synth import (
-    StrokeParams,
+    BrushParams,
     boundary_band,
-    encode_stroke,
+    encode_brush,
     ensure_binary,
-    synthesize_stroke,
+    synthesize_brush,
 )
 
 def scan_split(root: str | Path, split: str) -> list[dict[str, Any]]:
@@ -66,7 +74,7 @@ def _contiguous(*arrays: np.ndarray) -> list[np.ndarray]:
 def geometric_augment(
     rgb: np.ndarray,
     gt: np.ndarray,
-    stroke: np.ndarray,
+    brush: np.ndarray,
     valid: np.ndarray,
     rng: np.random.Generator,
     p_flip: float = 0.5,
@@ -76,15 +84,15 @@ def geometric_augment(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Apply one shared transform to all four arrays."""
     if rng.random() < p_flip:
-        rgb, gt, stroke, valid = (a[:, ::-1] for a in (rgb, gt, stroke, valid))
+        rgb, gt, brush, valid = (a[:, ::-1] for a in (rgb, gt, brush, valid))
     if rng.random() < p_flip:
-        rgb, gt, stroke, valid = (a[::-1] for a in (rgb, gt, stroke, valid))
+        rgb, gt, brush, valid = (a[::-1] for a in (rgb, gt, brush, valid))
 
     if rng.random() < p_rot90:
         k = int(rng.integers(1, 4))
-        rgb, gt, stroke, valid = (np.rot90(a, k) for a in (rgb, gt, stroke, valid))
+        rgb, gt, brush, valid = (np.rot90(a, k) for a in (rgb, gt, brush, valid))
 
-    rgb, gt, stroke, valid = _contiguous(rgb, gt, stroke, valid)
+    rgb, gt, brush, valid = _contiguous(rgb, gt, brush, valid)
 
     if rng.random() < p_rotate:
         h, w = rgb.shape[:2]
@@ -97,8 +105,8 @@ def geometric_augment(
             gt, matrix, (w, h), flags=cv2.INTER_NEAREST,
             borderMode=cv2.BORDER_CONSTANT, borderValue=0,
         )
-        stroke = cv2.warpAffine(
-            stroke, matrix, (w, h), flags=cv2.INTER_NEAREST,
+        brush = cv2.warpAffine(
+            brush, matrix, (w, h), flags=cv2.INTER_NEAREST,
             borderMode=cv2.BORDER_CONSTANT, borderValue=0,
         )
         valid = cv2.warpAffine(
@@ -106,7 +114,7 @@ def geometric_augment(
             borderMode=cv2.BORDER_CONSTANT, borderValue=0,
         )
 
-    return rgb, gt, stroke, valid
+    return rgb, gt, brush, valid
 
 
 def photometric_augment(rgb: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -167,7 +175,7 @@ def _validity(box: CropBox, height: int, width: int) -> np.ndarray:
 
 
 class BAMDataset(Dataset):
-    """Crops of ``<dataset>/<split>/im`` with a synthetic stroke channel."""
+    """Crops of ``<dataset>/<split>/im`` with a synthetic brush channel."""
 
     def __init__(
         self,
@@ -187,7 +195,7 @@ class BAMDataset(Dataset):
 
         self.crop_size = int(cfg.crop_size)
         self.target_sigma = float(cfg.target_sigma)
-        self.stroke_encoding = str(cfg.stroke_encoding)
+        self.brush_encoding = str(cfg.brush_encoding)
         self.mean = np.asarray(RGB_MEAN, np.float32)
         self.std = np.asarray(RGB_STD, np.float32)
         self.seed = int(cfg.seed)
@@ -204,7 +212,7 @@ class BAMDataset(Dataset):
             mix = {"boundary": 1.0, "near": 0.0, "empty": 0.0, "dense": 0.0}
 
         self.sampler = CropSampler(crop_size=self.crop_size, mix=mix)
-        self.stroke_params = StrokeParams.from_config(cfg)
+        self.brush_params = BrushParams.from_config(cfg)
 
     def __len__(self) -> int:
         return self.length
@@ -222,21 +230,21 @@ class BAMDataset(Dataset):
     def _stem_seed(stem: str) -> int:
         return int(hashlib.sha256(stem.encode()).hexdigest()[:8], 16)
 
-    def _stroke(self, item: dict, gt: np.ndarray, rgb: np.ndarray, rng) -> np.ndarray:
+    def _brush(self, item: dict, gt: np.ndarray, rgb: np.ndarray, rng) -> np.ndarray:
         if self.train:
-            return synthesize_stroke(gt, rgb=rgb, params=self.stroke_params, rng=rng)
+            return synthesize_brush(gt, rgb=rgb, params=self.brush_params, rng=rng)
 
-        # Validation must be reproducible: use the stored stroke when it exists,
+        # Validation must be reproducible: use the stored brush when it exists,
         # otherwise synthesise once from a seed derived from the filename.
-        if item["edge"] is not None:
-            stroke = to_binary_mask(imread_gray(item["edge"]))
-            if stroke.shape[:2] != gt.shape[:2]:
-                stroke = cv2.resize(
-                    stroke, (gt.shape[1], gt.shape[0]), interpolation=cv2.INTER_NEAREST
+        if item["brush"] is not None:
+            brush = to_binary_mask(imread_gray(item["brush"]))
+            if brush.shape[:2] != gt.shape[:2]:
+                brush = cv2.resize(
+                    brush, (gt.shape[1], gt.shape[0]), interpolation=cv2.INTER_NEAREST
                 )
-            return stroke
-        return synthesize_stroke(
-            gt, rgb=rgb, params=self.stroke_params, rng=self._stem_seed(item["stem"])
+            return brush
+        return synthesize_brush(
+            gt, rgb=rgb, params=self.brush_params, rng=self._stem_seed(item["stem"])
         )
 
     # -- item -------------------------------------------------------------- #
@@ -250,7 +258,7 @@ class BAMDataset(Dataset):
         if gt.shape[:2] != rgb.shape[:2]:
             gt = cv2.resize(gt, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
 
-        stroke = self._stroke(item, gt, rgb, rng)
+        brush = self._brush(item, gt, rgb, rng)
 
         if self.train and rng.random() < 0.5:
             factor = float(rng.uniform(0.75, 1.35))
@@ -259,7 +267,7 @@ class BAMDataset(Dataset):
             interp = cv2.INTER_AREA if factor < 1.0 else cv2.INTER_LINEAR
             rgb = cv2.resize(rgb, (nw, nh), interpolation=interp)
             gt = cv2.resize(gt, (nw, nh), interpolation=cv2.INTER_NEAREST)
-            stroke = cv2.resize(stroke, (nw, nh), interpolation=cv2.INTER_NEAREST)
+            brush = cv2.resize(brush, (nw, nh), interpolation=cv2.INTER_NEAREST)
 
         state = self.sampler.prepare(gt)
         box = self.sampler.sample(state, rng)
@@ -267,28 +275,31 @@ class BAMDataset(Dataset):
         half = self.crop_size // 2
         rgb_p = cv2.copyMakeBorder(rgb, half, half, half, half, cv2.BORDER_REPLICATE)
         gt_p = cv2.copyMakeBorder(gt, half, half, half, half, cv2.BORDER_CONSTANT, value=0)
-        stroke_p = cv2.copyMakeBorder(
-            stroke, half, half, half, half, cv2.BORDER_CONSTANT, value=0
+        brush_p = cv2.copyMakeBorder(
+            brush, half, half, half, half, cv2.BORDER_CONSTANT, value=0
         )
 
         rgb_c = _crop(rgb_p, box)
         gt_c = _crop(gt_p, box)
-        stroke_c = _crop(stroke_p, box)
+        brush_c = _crop(brush_p, box)
         valid = _validity(box, gt.shape[0], gt.shape[1])
 
         if self.train:
-            rgb_c, gt_c, stroke_c, valid = geometric_augment(rgb_c, gt_c, stroke_c, valid, rng)
+            rgb_c, gt_c, brush_c, valid = geometric_augment(rgb_c, gt_c, brush_c, valid, rng)
 
         rgb_f = rgb_c.astype(np.float32) / 255.0
         if self.train:
             rgb_f = photometric_augment(rgb_f, rng)
 
         gt_c = ensure_binary(gt_c)
+        # The target is the clean edge of the object inside this crop: the same
+        # raster the preprocessing step writes to gt_edge/, rebuilt here so it
+        # stays pixel-aligned through every geometric transform.
         target = boundary_band(gt_c, sigma=self.target_sigma)
-        stroke_ch = encode_stroke(stroke_c, encoding=self.stroke_encoding)
+        brush_ch = encode_brush(brush_c, encoding=self.brush_encoding)
 
         rgb_n = (rgb_f - self.mean[:3]) / self.std[:3]
-        image = np.concatenate([rgb_n.transpose(2, 0, 1), stroke_ch[None]], axis=0)
+        image = np.concatenate([rgb_n.transpose(2, 0, 1), brush_ch[None]], axis=0)
 
         return {
             "image": torch.from_numpy(np.ascontiguousarray(image, dtype=np.float32)),
@@ -297,7 +308,7 @@ class BAMDataset(Dataset):
             "gt": torch.from_numpy(
                 np.ascontiguousarray(gt_c[None].astype(np.float32) / 255.0)
             ),
-            "has_edge": torch.tensor(bool(target.max() > 0.1)),
+            "has_target": torch.tensor(bool(target.max() > 0.1)),
             "index": torch.tensor(index, dtype=torch.long),
             "stem": item["stem"],
         }

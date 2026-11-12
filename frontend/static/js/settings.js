@@ -1,8 +1,8 @@
 /**
  * Inspector bindings.
  *
- * Values are read into a plain object that is sent with every segmentation
- * request, and persisted to localStorage so the tool feels stable between
+ * Values are read into a plain object that is sent with every magic-brush and
+ * fill request, and persisted to localStorage so the tool feels stable between
  * sessions.
  */
 
@@ -14,7 +14,6 @@ const DEFAULTS = {
   edge_threshold: 0.45,
   expand: 0,
   smooth: 2,
-  mode: "object",
   merge_weighting: "uniform",
   brush: 8,
   opacity: 35,
@@ -32,7 +31,6 @@ export class Settings {
       mask: document.getElementById("p-mask"),
       expand: document.getElementById("p-expand"),
       smooth: document.getElementById("p-smooth"),
-      mode: document.getElementById("p-mode"),
       weight: document.getElementById("p-weight"),
       brush: document.getElementById("p-brush"),
       opacity: document.getElementById("p-opacity"),
@@ -61,10 +59,6 @@ export class Settings {
     this.range("brush", (value) => `${value} px`);
     this.range("opacity", (value) => `${value}%`);
 
-    this.el.mode?.addEventListener("change", (event) => {
-      this.values.mode = event.target.value;
-      this.save();
-    });
     this.el.weight?.addEventListener("change", (event) => {
       this.values.merge_weighting = event.target.value;
       this.save();
@@ -109,7 +103,6 @@ export class Settings {
       edge_threshold: this.values.edge_threshold,
       expand: this.values.expand,
       smooth: this.values.smooth,
-      mode: this.values.mode,
       merge_weighting: this.values.merge_weighting,
     };
   }
@@ -140,7 +133,6 @@ export class Settings {
     set(this.el.smooth, this.values.smooth);
     set(this.el.brush, this.values.brush);
     set(this.el.opacity, this.values.opacity);
-    if (this.el.mode) this.el.mode.value = this.values.mode;
     if (this.el.weight) this.el.weight.value = this.values.merge_weighting;
     if (this.el.showMask) this.el.showMask.checked = this.values.showMask;
     if (this.el.showEdge) this.el.showEdge.checked = this.values.showEdge;

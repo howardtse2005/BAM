@@ -45,8 +45,12 @@ def masking():
         split=split,
         image=image,
         crop_size=cfg().crop_size,
+        crop_min=cfg().crop_min,
+        crop_ratio=cfg().crop_ratio,
         crop_stride=cfg().crop_stride,
         max_crops=cfg().max_crops,
+        line_width=cfg().line_width,
+        fill_close=cfg().fill_close,
     )
 
 

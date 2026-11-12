@@ -2,12 +2,13 @@
 
 A dataset is any folder under ``datasets/`` that contains at least one split:
 
-    <dataset>/train/im/   <dataset>/train/gt/   <dataset>/train/gt_edge/
+    <dataset>/train/im/   <dataset>/train/gt/
+    <dataset>/train/gt_edge/   <dataset>/train/gt_brush/
     <dataset>/val/im/     ...
     <dataset>/test/im/    ...
 
-Images are addressed by ``(dataset, split, stem)``. GT and stroke folders are
-optional: a fresh folder with only ``im/`` can still be labelled.
+Images are addressed by ``(dataset, split, stem)``. The mask, edge and brush
+folders are optional: a fresh folder with only ``im/`` can still be labelled.
 """
 
 from __future__ import annotations
@@ -120,6 +121,7 @@ class DatasetIndex:
                     "splits": splits,
                     "has_gt": any((entry.root / s / "gt").is_dir() for s in splits),
                     "has_edge": any((entry.root / s / "gt_edge").is_dir() for s in splits),
+                    "has_brush": any((entry.root / s / "gt_brush").is_dir() for s in splits),
                     "thumb": thumb,
                 }
             )
@@ -189,11 +191,20 @@ class DatasetIndex:
         key = ("gt", dataset, split, name, path.stat().st_mtime_ns)
         return self._images.get_or_create(key, lambda: to_binary_mask(imread_gray(path)))
 
-    def load_stroke(self, dataset: str, split: str, name: str) -> np.ndarray | None:
+    def load_edge(self, dataset: str, split: str, name: str) -> np.ndarray | None:
+        """The clean edge line of the object, as stored by preprocessing."""
         path = self.resolve(dataset, split, "gt_edge", name)
         if path is None:
             return None
         key = ("edge", dataset, split, name, path.stat().st_mtime_ns)
+        return self._images.get_or_create(key, lambda: imread_gray(path))
+
+    def load_brush(self, dataset: str, split: str, name: str) -> np.ndarray | None:
+        """The synthetic brush stroke paired with the image, if one exists."""
+        path = self.resolve(dataset, split, "gt_brush", name)
+        if path is None:
+            return None
+        key = ("brush", dataset, split, name, path.stat().st_mtime_ns)
         return self._images.get_or_create(key, lambda: imread_gray(path))
 
     def thumbnail(self, dataset: str, split: str, name: str, size: int = 160) -> np.ndarray:

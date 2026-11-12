@@ -11,9 +11,10 @@
     <path d="M8 20h11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
     <path d="M4.5 14.5l6-6a2 2 0 0 1 2.8 0l3.2 3.2a2 2 0 0 1 0 2.8l-4 4H8z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
   </symbol>
-  <symbol id="i-wand" viewBox="0 0 24 24">
-    <path d="M4 20l9-9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-    <path d="M15 4v4M13 6h4M18 10v3M16.5 11.5h3M9 4v3M7.5 5.5h3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <symbol id="i-magic-brush" viewBox="0 0 24 24">
+    <path d="M4 20c3.6-.6 5.6-2.2 7.1-5.7 1.5-3.5 3-6.4 5.9-8.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M3 21l3.3-1.2a1.7 1.7 0 0 0 1-1l.7-2.2-2.8-2.8-2.2.7a1.7 1.7 0 0 0-1 1L1 18.7z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+    <path d="M17.5 2.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z" fill="currentColor"/>
   </symbol>
   <symbol id="i-fill" viewBox="0 0 24 24">
     <path d="M5 11l6-6 7 7-6 6a2 2 0 0 1-2.8 0L5 13.8A2 2 0 0 1 5 11z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
@@ -96,8 +97,8 @@
       <button class="tool" data-tool="eraser" type="button" title="Eraser (E)" aria-label="Eraser">
         <svg width="19" height="19"><use href="#i-eraser"/></svg>
       </button>
-      <button class="tool" data-tool="magic" type="button" title="Magic pen (M)" aria-label="Magic pen">
-        <svg width="19" height="19"><use href="#i-wand"/></svg>
+      <button class="tool" data-tool="magicBrush" type="button" title="Magic brush (M)" aria-label="Magic brush">
+        <svg width="19" height="19"><use href="#i-magic-brush"/></svg>
       </button>
       <button class="tool" data-tool="fill" type="button" title="Fill (F)" aria-label="Fill">
         <svg width="19" height="19"><use href="#i-fill"/></svg>
@@ -137,6 +138,18 @@
         <button class="btn btn--primary btn--sm" id="btn-open-2" type="button">Open image</button>
       </div>
       <div class="stage__hint" id="stage-hint" hidden></div>
+      <div class="proposal-bar" id="proposal-bar" hidden>
+        <span class="proposal-bar__label" id="proposal-label">Predicted edge</span>
+        <button class="btn btn--sm btn--primary" id="btn-accept-line" type="button" title="Keep this line (Enter)">
+          Accept
+        </button>
+        <button class="btn btn--sm" id="btn-fill-line" type="button" title="Fill the enclosed region">
+          Fill
+        </button>
+        <button class="btn btn--sm btn--ghost" id="btn-discard-line" type="button" title="Discard and re-stroke (Esc)">
+          Re-stroke
+        </button>
+      </div>
       <div class="stage__progress" id="stage-progress" hidden>
         <span class="spinner" aria-hidden="true"></span>
         <span id="progress-text">snapping…</span>
@@ -145,7 +158,8 @@
 
     <aside class="inspector" aria-label="Settings">
       <section class="panel">
-        <h2 class="panel__title">Magic pen</h2>
+        <h2 class="panel__title">Magic brush</h2>
+        <p class="panel__note">Draw along the edge, then accept the predicted line.</p>
         <div class="field">
           <label for="p-sensitivity">Sensitivity <output id="o-sensitivity">1.0</output></label>
           <input type="range" id="p-sensitivity" min="1" max="3" step="0.1" value="1">
@@ -155,7 +169,7 @@
           <input type="range" id="p-edge" min="0.1" max="0.9" step="0.05" value="0.45">
         </div>
         <div class="field">
-          <label for="p-mask">Mask threshold <output id="o-mask">0.50</output></label>
+          <label for="p-mask">Fill threshold <output id="o-mask">0.50</output></label>
           <input type="range" id="p-mask" min="0.1" max="0.9" step="0.05" value="0.5">
         </div>
         <div class="field">
@@ -165,13 +179,6 @@
         <div class="field">
           <label for="p-smooth">Smoothing <output id="o-smooth">2</output></label>
           <input type="range" id="p-smooth" min="0" max="4" step="1" value="2">
-        </div>
-        <div class="field">
-          <label for="p-mode">Mode</label>
-          <select id="p-mode">
-            <option value="object">Object (fill)</option>
-            <option value="line">Line (edge only)</option>
-          </select>
         </div>
         <div class="field">
           <label for="p-weight">Merge</label>
@@ -218,6 +225,8 @@
         <dl class="kv">
           <dt>Size</dt><dd id="i-size">—</dd>
           <dt>Mask</dt><dd id="i-mask">empty</dd>
+          <dt>Line</dt><dd id="i-line">none</dd>
+          <dt>Crop</dt><dd id="i-crop-size">—</dd>
           <dt>Crops</dt><dd id="i-crops">0</dd>
         </dl>
       </section>
@@ -258,8 +267,12 @@
     split: {{ split|tojson }},
     image: {{ image|tojson }},
     cropSize: {{ crop_size|int }},
+    cropMin: {{ crop_min|int }},
+    cropRatio: {{ crop_ratio|float }},
     cropStride: {{ crop_stride|int }},
-    maxCrops: {{ max_crops|int }}
+    maxCrops: {{ max_crops|int }},
+    lineWidth: {{ line_width|int }},
+    fillClose: {{ fill_close|int }}
   };
 </script>
 <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>

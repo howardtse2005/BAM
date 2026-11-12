@@ -1,7 +1,7 @@
 """Single model holder for the whole process.
 
 The reference implementation builds ``Predictor`` twice (once in ``app.py`` and
-once in ``magic_pen_router.py``), which loads the weights twice and doubles peak
+once in its router module), which loads the weights twice and doubles peak
 memory. This registry is created once, warmed up once, and shared.
 
 It also refuses to load a checkpoint whose ``data_tier`` is not the configured
@@ -156,12 +156,12 @@ class ModelRegistry:
         return self.predictor is not None
 
     def predict(
-        self, rgb_crops: list[np.ndarray], stroke_crops: list[np.ndarray]
+        self, rgb_crops: list[np.ndarray], brush_crops: list[np.ndarray]
     ) -> np.ndarray:
         if self.predictor is None:
             raise ModelUnavailable(self.error or "model unavailable")
         with self._infer_lock:
-            return self.predictor.predict(rgb_crops, stroke_crops)
+            return self.predictor.predict(rgb_crops, brush_crops)
 
     def warmup(self) -> float:
         if self.predictor is None:
@@ -170,11 +170,11 @@ class ModelRegistry:
 
         size = self.cfg.crop_size
         rgb = np.zeros((size, size, 3), np.uint8)
-        stroke = np.zeros((size, size), np.uint8)
-        stroke[size // 2 - 2 : size // 2 + 2, 20:-20] = 255
+        brush = np.zeros((size, size), np.uint8)
+        brush[size // 2 - 2 : size // 2 + 2, 20:-20] = 255
         started = time.perf_counter()
         with self._infer_lock:
-            self.predictor.predict([rgb], [stroke])
+            self.predictor.predict([rgb], [brush])
         return (time.perf_counter() - started) * 1000.0
 
     def info(self) -> dict:

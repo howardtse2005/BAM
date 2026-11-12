@@ -25,8 +25,12 @@ function boot0() {
     split,
     image: boot.image,
     cropSize: boot.cropSize,
+    cropMin: boot.cropMin,
+    cropRatio: boot.cropRatio,
     stride: boot.cropStride || 128,
     maxCrops: boot.maxCrops,
+    lineWidth: boot.lineWidth,
+    fillClose: boot.fillClose,
   });
   const settings = new Settings(canvas);
   const ui = new UI({ canvas, fs, settings, bootstrap: boot });
