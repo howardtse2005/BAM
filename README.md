@@ -69,7 +69,7 @@ Rules:
   manifest and no automatic splitting.
 - Masks must be single-channel, with the object at 255 and the background at 0.
 - `gt_edge/` and `gt_brush/` are never authored by hand. Either may be missing;
-  the trainer regenerates what it needs from `gt/`.
+  the preprocessing step regenerates what it needs from `gt/`.
 
 ---
 
@@ -301,10 +301,12 @@ python run.py --host 0.0.0.0 --serve waitress    # LAN / production
 ### The magic brush
 
 1. **Dataset picker** — every folder under `datasets/` with split counts and a thumbnail.
-2. **Editor** — left tool rail, centre canvas, right inspector, status bar.
-3. **Draw** — pick the magic brush (`M`) and drag *roughly* along the object edge.
-   Crops are collected along the stroke by arc length, so a fast flick and a slow
-   drag cover the boundary equally well.
+2. **Editor** — left tool rail, centre canvas, right inspector, status bar. It
+   opens with an **empty mask**: the dataset's `gt/` is never loaded, so nothing
+   is segmented until you draw.
+3. **Draw** — the magic brush (`M`) is the default tool. Drag *roughly* along
+   the object edge. Crops are collected along the stroke by arc length, so a
+   fast flick and a slow drag cover the boundary equally well.
 4. **Review** — on release, each crop is run through the UNet together with the
    stroke itself, the per-crop predictions are merged, and the result is thinned
    and re-widened into a **uniform clean line**. The line replaces the wobbly

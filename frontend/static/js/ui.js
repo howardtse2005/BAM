@@ -200,17 +200,19 @@ export class UI {
 
   async loadImage(name) {
     try {
+      // Opening an image starts from an empty mask. A stored mask is never
+      // fetched here: the dataset's gt is the answer to the question the editor
+      // asks, so loading it would segment the object before the user drew
+      // anything. The flow is stroke -> clean line -> accept -> fill.
       await this.canvas.load(name);
       el("image-name").textContent = name;
       document.title = `${name} — BAM`;
       el("stage-empty").hidden = true;
       this.hideProposalBar();
       this.updateImageInfo();
-
-      const mask = await this.fs.mask(name);
-      if (mask) await this.canvas.loadMask(mask);
-      this.updateImageInfo();
-      this.canvas.fit();
+      this.hint(
+        "Magic brush: drag roughly along the object edge, accept the clean line, then fill."
+      );
     } catch (error) {
       toast(`Could not open ${name}: ${errorMessage(error)}`, "error");
     }
@@ -235,6 +237,13 @@ export class UI {
   async save() {
     if (!this.canvas.imageName) {
       toast("Open an image first", "warn");
+      return;
+    }
+    // Saving an empty mask would replace the dataset's gt with a blank image.
+    // The editor starts empty by design, so this is the state a stray Ctrl+S
+    // lands in.
+    if (!this.canvas.maskNonEmpty) {
+      toast("Nothing to save — draw an object first", "warn");
       return;
     }
     try {
@@ -286,6 +295,7 @@ export class UI {
     if (!this.canvas.acceptProposal()) return false;
     this.hideProposalBar();
     this.updateImageInfo();
+    this.hint("Line accepted. Press F to fill the enclosed region.");
     return true;
   }
 

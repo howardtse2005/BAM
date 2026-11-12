@@ -51,17 +51,6 @@ export class FileSystem {
     );
   }
 
-  async mask(name) {
-    const response = await fetch(
-      `/api/mask/${encodeURIComponent(this.dataset)}/${encodeURIComponent(
-        this.split
-      )}/${encodeURIComponent(name)}`
-    );
-    if (response.status === 404) return null;
-    const data = await parse(response);
-    return data.mask_base64 || null;
-  }
-
   async saveMask(name, maskBase64) {
     return parse(
       await fetch("/api/mask/save", {

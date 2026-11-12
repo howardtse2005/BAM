@@ -54,7 +54,7 @@ export class EditorCanvas {
     this.panY = 0;
     this.viewDirty = false;
 
-    this.tool = "brush";
+    this.tool = "magicBrush";
     this.brushSize = 8;
     this.spaceDown = false;
     this.drawing = false;
@@ -925,44 +925,6 @@ export class EditorCanvas {
 
     this.maskCtx.putImageData(current, 0, 0);
     this.maskNonEmpty = true;
-    this.updatePreview();
-    this._status();
-  }
-
-  async loadMask(maskBase64) {
-    if (!maskBase64 || !this.width) return;
-    const image = await loadImage(maskBase64);
-
-    const temp = document.createElement("canvas");
-    temp.width = this.width;
-    temp.height = this.height;
-    const tempCtx = temp.getContext("2d", { willReadFrequently: true });
-    tempCtx.drawImage(image, 0, 0, this.width, this.height);
-    const source = tempCtx.getImageData(0, 0, this.width, this.height);
-
-    const data = source.data;
-
-    // A saved mask is either opaque grayscale (white = object) or white with
-    // alpha (alpha = object). Decide once per image; testing alpha per pixel
-    // would mark an opaque grayscale mask as fully foreground.
-    let hasAlpha = false;
-    for (let i = 3; i < data.length; i += 4) {
-      if (data[i] < 250) {
-        hasAlpha = true;
-        break;
-      }
-    }
-
-    for (let i = 0; i < data.length; i += 4) {
-      const on = hasAlpha ? data[i + 3] > 127 : data[i] > 127;
-      data[i] = 255;
-      data[i + 1] = 255;
-      data[i + 2] = 255;
-      data[i + 3] = on ? 255 : 0;
-    }
-
-    this.maskCtx.putImageData(source, 0, 0);
-    this._recountMask();
     this.updatePreview();
     this._status();
   }
