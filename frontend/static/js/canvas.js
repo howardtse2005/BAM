@@ -40,10 +40,11 @@ export class EditorCanvas {
     this.lineWidth = options.lineWidth || 3;
     this.fillClose = options.fillClose || 5;
 
-    // Magic brush geometry. The band is what the user draws and sees; the
-    // prompt is the thinner stroke actually handed to the model. The gap
-    // between them is the tolerance the predicted line may move in, so it can
-    // wander a few px off the centreline and still sit under the stroke.
+    // Magic brush geometry. The user draws one stroke and sees exactly that
+    // width; the thinner prompt inside it is a transport detail for the model.
+    // The difference between the two is the tolerance the predicted line may
+    // move in, so it can wander a few px off the centreline and still sit under
+    // the stroke.
     this.magicWidth = options.magicWidth || 32;
     this.promptRatio = options.promptRatio || 0.625;
     this.promptMin = options.promptMin || 3;
@@ -79,11 +80,14 @@ export class EditorCanvas {
     // window comes from the stroke, not from the canvas.
     this.cropInfo = { count: 0, window: 0, size: 0 };
 
+    // The mask the server receives: the thin prompt the model is conditioned
+    // on. It is not the stroke the user sees, so it never reaches the visible
+    // stroke layer.
     this.strokeData = document.createElement("canvas");
     this.strokeDataCtx = this.strokeData.getContext("2d");
-    // The band is painted opaquely here and composited translucent, because
-    // painting it translucent directly would double-darken every joint between
-    // two pointer samples.
+    // The visible stroke, at the brush width the user chose. Painted opaquely
+    // here and composited translucent, because painting it translucent directly
+    // would double-darken every joint between two pointer samples.
     this.bandCanvas = document.createElement("canvas");
     this.bandCtx = this.bandCanvas.getContext("2d");
     this.tint = document.createElement("canvas");
@@ -100,10 +104,6 @@ export class EditorCanvas {
     this.cursor = document.createElement("div");
     this.cursor.className = "cursor-ring";
     this.cursor.hidden = true;
-    this.cursorCore = document.createElement("div");
-    this.cursorCore.className = "cursor-ring__core";
-    this.cursorCore.hidden = true;
-    this.cursor.appendChild(this.cursorCore);
     this.stage.appendChild(this.cursor);
 
     this._readThemeColors();
@@ -280,7 +280,7 @@ export class EditorCanvas {
     this._updateCursor(this.lastClient);
   }
 
-  /** Visible magic-brush band width, in canvas px. The slider drives this. */
+  /** Visible magic-brush width, in canvas px. The slider drives this. */
   setMagicWidth(width) {
     this.magicWidth = clamp(Number(width) || 32, 4, 160);
     this._updateCursor(this.lastClient);
@@ -288,17 +288,19 @@ export class EditorCanvas {
   }
 
   /**
-   * Width of the stroke handed to the model for a given band width.
+   * Width of the stroke handed to the model for a given brush width.
    *
-   * Mirrors ``Config.prompt_width_for``: a fixed fraction of the band, clamped
-   * to the width range the model was trained on and never wider than the band
-   * it has to sit inside.
+   * Not a second width the user sets or sees: the stroke is one width on
+   * screen, and this is the thinner prompt painted into the mask. Mirrors
+   * ``Config.prompt_width_for`` — a fixed fraction of the brush, clamped to the
+   * width range the model was trained on and never wider than the stroke it
+   * sits inside.
    */
-  promptWidthFor(bandWidth) {
-    const band = Math.max(1, Math.round(Number(bandWidth) || 1));
-    const raw = Math.round(band * this.promptRatio);
+  promptWidthFor(brushWidth) {
+    const brush = Math.max(1, Math.round(Number(brushWidth) || 1));
+    const raw = Math.round(brush * this.promptRatio);
     const clamped = Math.min(this.promptMax, Math.max(this.promptMin, raw));
-    return Math.max(1, Math.min(band, clamped));
+    return Math.max(1, Math.min(brush, clamped));
   }
 
   get promptWidth() {
@@ -421,22 +423,13 @@ export class EditorCanvas {
       return;
     }
     const rect = this.stage.getBoundingClientRect();
-    const magic = this.tool === "magicBrush";
-    const width = magic ? this.magicWidth : this.brushSize;
+    const width = this.tool === "magicBrush" ? this.magicWidth : this.brushSize;
     const size = Math.max(6, width * this.zoom);
     this.cursor.style.width = `${size}px`;
     this.cursor.style.height = `${size}px`;
     this.cursor.style.left = `${position.x - rect.left}px`;
     this.cursor.style.top = `${position.y - rect.top}px`;
     this.cursor.hidden = this.tool === "pan";
-
-    // The inner ring is the prompt: the only part of the band the model sees.
-    const core = magic ? Math.max(4, this.promptWidth * this.zoom) : 0;
-    this.cursorCore.hidden = !core;
-    if (core) {
-      this.cursorCore.style.width = `${core}px`;
-      this.cursorCore.style.height = `${core}px`;
-    }
   }
 
   // ---------------------------------------------------------------- drawing
@@ -485,11 +478,10 @@ export class EditorCanvas {
   _magicDraw(x, y) {
     const band = this.bandCtx;
     const data = this.strokeDataCtx;
-    const promptWidth = this.promptWidth;
 
-    // The band is painted in the stroke colour, not white: it is only ever used
-    // for display, and compositing it at low alpha is what makes it read as a
-    // tolerance region around the solid core.
+    // What the user draws is one width — the whole stroke, not a core inside a
+    // band. `data` is painted thinner and stays invisible: it is the 4th channel
+    // the model is conditioned on, not a second brush to look at.
     band.strokeStyle = this.strokeColor;
     band.fillStyle = this.strokeColor;
     band.lineWidth = this.magicWidth;
@@ -498,7 +490,7 @@ export class EditorCanvas {
 
     data.strokeStyle = "#fff";
     data.fillStyle = "#fff";
-    data.lineWidth = Math.max(2, promptWidth);
+    data.lineWidth = Math.max(2, this.promptWidth);
     data.lineCap = "round";
     data.lineJoin = "round";
 
@@ -533,24 +525,21 @@ export class EditorCanvas {
   }
 
   /**
-   * Rebuild the visible stroke from its two opaque layers.
+   * Rebuild the visible stroke.
    *
-   * The band is the tolerance region — where the predicted line is allowed to
-   * land — so it is drawn translucent. The prompt core is drawn solid, because
-   * it is the only part the model is conditioned on. Redrawing both layers on
-   * every sample is what keeps the band free of the darker joints that
-   * per-segment alpha compositing would leave.
+   * One width, one layer: the band is the whole stroke now, so there is no
+   * inner core to composite over it. Redrawing the full band on every sample is
+   * what keeps it free of the darker joints that per-segment alpha compositing
+   * would leave.
    */
   _composeStroke() {
     const ctx = this.strokeCtx;
     ctx.clearRect(0, 0, this.width, this.height);
 
     ctx.save();
-    ctx.globalAlpha = 0.3;
+    ctx.globalAlpha = 0.45;
     ctx.drawImage(this.bandCanvas, 0, 0);
     ctx.restore();
-
-    ctx.drawImage(this._drawTint(this.strokeData, this.strokeColor), 0, 0);
   }
 
   async _magicEnd() {
@@ -592,8 +581,6 @@ export class EditorCanvas {
       this.onSegmented?.({
         ...result,
         closed: Boolean(result.closed),
-        bandWidth: result.band_width || this.magicWidth,
-        promptWidth: result.prompt_width || this.promptWidth,
         elapsed: performance.now() - started,
         committed,
       });
@@ -982,7 +969,6 @@ export class EditorCanvas {
       cropSize: this.cropInfo.size,
       windowSize: this.cropInfo.window,
       brushWidth: this.magicWidth,
-      promptWidth: this.promptWidth,
       hasMask: this.maskNonEmpty,
       tool: this.tool,
     });

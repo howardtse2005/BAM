@@ -87,7 +87,7 @@ export class UI {
     });
     const hints = {
       magicBrush:
-        "Drag along the object edge. The solid core is what the model sees; the wide band is how far the predicted line may move.",
+        "Drag along the object edge. The predicted line may land anywhere under your stroke.",
       pan: "Drag to pan. Wheel to zoom.",
       fill: "Fill the region enclosed by the line you drew.",
     };
@@ -237,7 +237,7 @@ export class UI {
           : `${status.cropSize} px`;
     }
     if (el("i-band") && status.brushWidth) {
-      el("i-band").textContent = `${status.brushWidth} / ${status.promptWidth} px`;
+      el("i-band").textContent = `${status.brushWidth} px`;
     }
     if (el("s-size") && this.canvas.width) {
       el("s-size").textContent = `${this.canvas.width} × ${this.canvas.height}`;
@@ -286,12 +286,12 @@ export class UI {
     this.canvas.setEdge(result.edge_base64);
 
     if (!result.committed) {
-      this.hint("No edge found under your stroke — draw a wider band or follow the edge more closely.");
+      this.hint("No edge found under your stroke — draw a wider stroke or follow the edge more closely.");
       this.updateImageInfo();
       return;
     }
 
-    // The prediction is clipped to the band, so a large trim means the stroke
+    // The prediction is clipped to the stroke, so a large trim means the stroke
     // was drawn too far from the edge or too narrow for the model's guess.
     const predicted = Number(stats.predicted_px || 0);
     const clipped = Number(stats.clipped_px || 0);

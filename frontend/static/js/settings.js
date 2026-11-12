@@ -80,12 +80,11 @@ export class Settings {
   }
 
   /**
-   * "32 px · core 20": the band the user draws, then the thinner prompt stroke
-   * the model is actually given. Showing both makes the tolerance explicit
-   * instead of leaving it as an invisible implementation detail.
+   * One number: the stroke the user draws is the whole brush, and the thinner
+   * prompt inside it is not something to choose or look at.
    */
-  magicLabel(band) {
-    return `${band} px · core ${this.canvas.promptWidthFor(band)}`;
+  magicLabel(brushWidth) {
+    return `${brushWidth} px`;
   }
 
   range(key, format) {
@@ -94,8 +93,6 @@ export class Settings {
     input.addEventListener("input", () => {
       const value = Number(input.value);
       this.values[key] = value;
-      // The canvas has to be updated before the label is formatted: the label
-      // reports the prompt width derived from the new band.
       if (key === "brush") this.canvas.setBrushSize(value);
       if (key === "magicWidth") this.canvas.setMagicWidth(value);
       if (key === "opacity") this.canvas.setMaskOpacity(value);

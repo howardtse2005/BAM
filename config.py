@@ -135,12 +135,13 @@ class Config:
     fill_close: int = 5                       # px of gap bridged before filling a line
 
     # ------------------------------------------------------ magic brush geometry
-    # The user draws a *band*; the model is given a thinner *prompt* stroke inside
-    # it. The band is the tolerance the predicted line is allowed to move in, so a
-    # prediction that sits a few px off the centreline is still under the stroke
-    # instead of floating beside it.
-    magic_brush_width: int = 32               # visible band width, canvas px (slider default)
-    magic_prompt_ratio: float = 0.625         # prompt width / band width (20 px in a 32 px band)
+    # The user draws one stroke and sees exactly that width; the model is given a
+    # thinner *prompt* stroke inside it, which is what ``/api/segment`` receives
+    # as ``stroke_mask``. The difference between the two is the tolerance the
+    # predicted line may move in, so a prediction a few px off the centreline is
+    # still under the stroke instead of floating beside it.
+    magic_brush_width: int = 32               # visible brush width, canvas px (slider default)
+    magic_prompt_ratio: float = 0.625         # prompt width / brush width (12 px from a 32 px brush)
     magic_prompt_min: int = 3                 # prompt is never thinner than this
     magic_prompt_max: int = 12                # ...nor wider; training brushes are 3-12 px
     merge_weighting: str = "uniform"          # uniform | gaussian

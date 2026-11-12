@@ -385,18 +385,6 @@ input[type="checkbox"] {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9);
 }
 
-/* Inner ring: the prompt stroke the model is conditioned on, inside the band. */
-.cursor-ring__core {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  border: 1px dashed rgba(255, 255, 255, 0.85);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
-  border-radius: 50%;
-  pointer-events: none;
-}
-
 .stage.is-panning .cursor-ring {
   display: none;
 }

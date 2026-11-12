@@ -331,28 +331,32 @@ have already uploaded.
 
 `Alt`+drag subtracts instead of adding. `Ctrl+Z` undoes, including a fill.
 
-### The stroke is wider than the prompt
+### One brush width, one thinner prompt
 
-The brush you see and the stroke the model gets are two different widths:
+The brush you draw is a single width, and that is the only width on screen: the
+cursor is one ring, the trail is one translucent stroke, and the slider reads one
+number.
+
+Behind it the model is conditioned on a thinner stroke, because that is what it
+was trained on:
 
 | | Width | Where it comes from |
 |---|---|---|
-| **Band** (what you draw) | 32 px by default | the *Brush width* slider, 8–96 px |
-| **Prompt** (what the model gets) | 12 px | `magic_prompt_ratio` (0.625) of the band, clamped to `[magic_prompt_min, magic_prompt_max]` = [3, 12] |
+| **Brush** (what you draw and see) | 32 px by default | the *Brush width* slider, 8–96 px |
+| **Prompt** (the mask sent) | 12 px | `magic_prompt_ratio` (0.625) of the brush, clamped to `[magic_prompt_min, magic_prompt_max]` = [3, 12] |
 
-The band is drawn as a translucent wash with the solid prompt core inside it, and
-the cursor shows both rings. The window is cut around the prompt, so the model is
-conditioned on exactly the stroke the preview highlights — but a prediction is
-allowed to sit anywhere under the band. That tolerance is what keeps the clean
-line attributable to the stroke: a line that drifts 8 px off the centreline is
-still visibly *your* stroke, while a line 8 px outside a hairline stroke looks
-like it came from nowhere.
+The prompt is painted into the stroke mask and never drawn over the image, so
+there is no inner core to line up with a crop any more. The difference between
+the two widths is the tolerance the predicted line may move in — that is what
+keeps the clean line attributable to the stroke: a line that drifts 8 px off the
+centreline is still visibly *your* stroke, while a line 8 px outside a hairline
+stroke looks like it came from nowhere.
 
 The tolerance is enforced, not hoped for. `/api/segment` masks the edge with the
-band (inset by half the output line width) before thinning it, so the returned
+stroke (inset by half the output line width) before thinning it, so the returned
 line cannot contain a pixel outside the drawn stroke. When the model wanders past
-the band, the line is trimmed and `stats.clipped_px` reports it; the UI suggests
-widening the brush when more than 30 % of the prediction was cut.
+the stroke, the line is trimmed and `stats.clipped_px` reports it; the UI
+suggests widening the brush when more than 30 % of the prediction was cut.
 
 `magic_prompt_max` defaults to 12 because that is the widest brush the model
 was trained on. Raising it makes the prompt thicker — closer to "the stroke I
@@ -361,10 +365,10 @@ drew is what the model sees" — but pushes the fourth channel out of distributi
 ### One square, one forward pass
 
 The stroke decides the crop. `/api/segment` takes the bounding box of the painted
-pixels, grows it by half the band on every side, and makes it square:
+prompt, grows it by half the brush on every side, and makes it square:
 
 ```
-side = max(bbox_width, bbox_height) + band_width      →  snapped up to a multiple of 32
+side = max(bbox_width, bbox_height) + brush_width      →  snapped up to a multiple of 32
 ```
 
 | Stroke | Window | Run at |
@@ -426,7 +430,7 @@ ask for a window that misses part of the stroke it just drew.
   "crop_size": 192,                             // what the network ran at
   "scale": 1.0,                                 // crop_size / window.size
   "band_width": 32,                             // the stroke the user drew
-  "prompt_width": 20,                           // the stroke the model saw
+  "prompt_width": 20,                           // the thinner mask the model saw
   "stats": { "num_crops": 1, "ms_infer": 24.1, "ms_post": 21.7, "clipped_px": 0 }
 }
 ```
@@ -451,8 +455,8 @@ lr: 0.0003
 mode: line                    # line = predict the edge, object = also fill
 line_width: 3                 # predicted line thickness, canvas px
 fill_close: 5                 # px of gap bridged before filling
-magic_brush_width: 32         # visible band, canvas px (slider default)
-magic_prompt_ratio: 0.625     # prompt stroke / band width
+magic_brush_width: 32         # visible brush, canvas px (slider default)
+magic_prompt_ratio: 0.625     # prompt stroke / brush width
 magic_prompt_min: 3           # prompt is never thinner than this
 magic_prompt_max: 12          # ...nor wider
 upload_dataset: uploads       # where the site stores uploaded images
