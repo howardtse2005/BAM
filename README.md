@@ -7,7 +7,7 @@ returns a clean line; a deterministic fill turns that line into a mask.
 Runs on CPU. No GPU required at inference.
 
 ```
-brush → crops → UNet (0.34 M params) → merge → clean line → accept → fill → mask
+brush → crops → UNet (0.34 M params) → merge → clean line → fill → mask
 ```
 
 ---
@@ -307,31 +307,26 @@ python run.py
 python run.py --host 0.0.0.0 --serve waitress    # LAN / production
 ```
 
-### The magic brush
+### The editor
 
-1. **Dataset picker** — every folder under `datasets/` with split counts and a thumbnail.
-2. **Editor** — left tool rail, centre canvas, right inspector, status bar. It
-   opens with an **empty mask**: the dataset's `gt/` is never loaded, so nothing
-   is segmented until you draw.
-3. **Draw** — the magic brush (`M`) is the default tool. Drag *roughly* along
+The site opens straight into the editor with an empty canvas. There is no dataset
+browser: you upload your own image, which is stored under `upload_dataset`
+(`datasets/uploads/` by default) and opened for editing. **Open** lists what you
+have already uploaded.
+
+1. **Upload** — the stage asks for an image until one is loaded.
+2. **Draw** — the magic brush (`M`) is the default tool. Drag *roughly* along
    the object edge. Crops are collected along the stroke by arc length, so a
    fast flick and a slow drag cover the boundary equally well.
-4. **Review** — on release, each crop is run through the UNet together with the
-   stroke itself, the per-crop predictions are merged, clipped to the stroke you
-   drew, and the result is thinned and re-widened into a **uniform clean line**.
-   The line replaces the wobbly stroke on screen; nothing is committed yet.
-5. **Decide** — the action bar offers:
-   - **Accept** (`Enter`) — the line becomes the mask.
-   - **Fill** — accept and immediately segment the enclosed region.
-   - **Re-stroke** (`Esc`) — discard the line and draw again.
-
-   `Fill` is disabled while the line is open, because an open line has no
-   interior to fill. Accepting it as a line is still allowed — a traced edge is
-   useful on its own for thin structures.
-6. **Fill** (`F`) — flood the region bounded by the line: hairline gaps up to
+3. **The line lands in the mask** — on release, each crop is run through the UNet
+   with the stroke itself, the per-crop predictions are merged, clipped to the
+   stroke you drew, thinned and re-widened into a **uniform clean line**. There is
+   no accept step: the line is the result, so it goes into the mask immediately.
+   A stroke you do not want is one `Ctrl+Z` away.
+4. **Fill** (`F`) — flood the region bounded by the line: hairline gaps up to
    `fill_close` px are bridged, the outside is flooded, holes stay holes, and the
    boundary is refined with a guided filter before `expand` is applied.
-7. **Save** — writes `<dataset>/<split>/gt/<name>.png` at the image's native size.
+5. **Save** — writes `<dataset>/<split>/gt/<name>.png` at the image's native size.
 
 `Alt`+drag subtracts instead of adding. `Ctrl+Z` undoes, including a fill.
 
@@ -342,7 +337,7 @@ The brush you see and the stroke the model gets are two different widths:
 | | Width | Where it comes from |
 |---|---|---|
 | **Band** (what you draw) | 32 px by default | the *Brush width* slider, 8–96 px |
-| **Prompt** (what the model gets) | 20 px | `magic_prompt_ratio` (0.625) of the band, clamped to `[magic_prompt_min, magic_prompt_max]` |
+| **Prompt** (what the model gets) | 12 px | `magic_prompt_ratio` (0.625) of the band, clamped to `[magic_prompt_min, magic_prompt_max]` = [3, 12] |
 
 The band is drawn as a translucent wash with the solid prompt core inside it, and
 the cursor shows both rings. Crops are centred on the prompt, so the model is
@@ -358,9 +353,9 @@ returned line cannot contain a pixel outside the drawn stroke. When the model
 wanders past the band, the line is trimmed and `stats.clipped_px` reports it; the
 UI suggests widening the brush when more than 30 % of the prediction was cut.
 
-Raising `magic_prompt_max` above 20 makes the prompt itself thicker, which is
-closer to "the stroke I drew is what the model sees" but drifts away from the
-3–12 px brush widths the model was trained on.
+`magic_prompt_max` defaults to 12 because that is the widest brush the model
+was trained on. Raising it makes the prompt thicker — closer to "the stroke I
+drew is what the model sees" — but pushes the fourth channel out of distribution.
 
 ### Crop size follows the image
 
@@ -396,7 +391,7 @@ warning. Nothing is silently faked.
 | `GET` | `/api/datasets/<ds>/images?split=train` | image names |
 | `GET` | `/media/<ds>/<split>/<im\|gt\|gt_edge\|gt_brush>/<name>` | image bytes |
 | `POST` | `/api/segment` | crops + stroke → predicted line (+ `closed`) |
-| `POST` | `/api/fill` | accepted line → filled region |
+| `POST` | `/api/fill` | line in the mask → filled region |
 | `POST` | `/api/mask/save` | save a mask |
 | `POST` | `/api/image/upload` | upload and canonicalise |
 | `POST` | `/api/magic_brush/predict_crops` | reference-client contract, returns an edge mask |
@@ -445,7 +440,8 @@ fill_close: 5                 # px of gap bridged before filling
 magic_brush_width: 32         # visible band, canvas px (slider default)
 magic_prompt_ratio: 0.625     # prompt stroke / band width
 magic_prompt_min: 3           # prompt is never thinner than this
-magic_prompt_max: 20          # ...nor wider
+magic_prompt_max: 12          # ...nor wider
+upload_dataset: uploads       # where the site stores uploaded images
 train_device: auto
 infer_device: cpu
 backend: auto
@@ -505,7 +501,7 @@ BAM/
 ├── datasets/            # <name>/{train,val,test}/{im,gt,gt_edge,gt_brush} + meta.json
 ├── model/               # trained weights (bam_v1.pth / .onnx)
 ├── frontend/
-│   ├── templates/       # base, select_dataset, index
+│   ├── templates/       # base, index
 │   └── static/{css,js}  # canvas.js, magic_brush.js, settings.js, ...
 ├── backend/
 │   ├── app.py           # Flask factory
@@ -520,7 +516,7 @@ BAM/
 │   ├── dataset.py, sampler.py, losses.py, metrics.py
 │   └── train.py, evaluate.py, export_onnx.py
 ├── tools/               # make_demo_subset, verify_alignment, visualize_crops, benchmark_cpu
-├── tests/               # 130 tests
+├── tests/               # 157 tests
 ├── config.py            # the only config: flat dataclass + defaults
 ├── imgio.py             # unicode-safe image IO
 └── run.py
@@ -570,13 +566,13 @@ Attribution is a legal obligation. If you redistribute the app, keep these credi
 ## Limitations
 
 - **Thin structures** (wires, cracks): the line is the product. Fill adds little,
-  and the accepted line at `line_width` is usually the right answer.
+  and the predicted line at `line_width` is usually the right answer.
 - **Transparent or heavily occluded objects**: boundaries are genuinely ambiguous.
 - **Objects under ~16 px** at the working resolution: below the model's useful scale.
-- **Open lines** cannot be filled; the UI disables Fill and says so.
+- **Open lines** cannot be filled; the fill reports that instead of guessing.
 - **One object per loop**: multiple loops in one pass are unioned.
 - **A very thick brush over-fills**: the region covers the line itself, so a 20 px
-  stroke adds ~10 px around the object. The accepted line is 3 px, so in practice
+  stroke adds ~10 px around the object. The predicted line is 3 px, so in practice
   the bias is sub-pixel.
 
 ---
@@ -588,7 +584,7 @@ pytest -q
 python -m pyflakes backend training tools tests config.py imgio.py run.py
 ```
 
-130 tests cover config precedence and crop sizing, edge/brush synthesis
+157 tests cover config precedence and crop sizing, edge/brush synthesis
 invariants (the clean edge sits on the boundary and covers the whole perimeter;
 the brush is not the edge), joint-transform alignment, crop-bucket coverage,
 model shapes and checkpoint round-trips, merge arithmetic, the fill algorithm

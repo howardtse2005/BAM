@@ -94,19 +94,28 @@ def test_unknown_override_key_is_rejected():
         Config.load(overrides=["nonsense=1"])
 
 
-@pytest.mark.parametrize(
-    "band,expected",
-    [
-        (32, 20),  # 0.625 of the band, and the widest prompt allowed
-        (96, 20),  # capped: a thick band must not become a thick prompt
-        (8, 5),  # below the cap the ratio is what decides
-        (4, 3),  # never thinner than the minimum
-    ],
-)
-def test_prompt_width_tracks_the_band(band, expected):
+def test_prompt_width_tracks_the_band():
+    cfg = Config.from_dict(
+        {
+            "magic_brush_width": 32,
+            "magic_prompt_ratio": 0.625,
+            "magic_prompt_min": 3,
+            "magic_prompt_max": 20,
+        }
+    )
+    assert cfg.prompt_width_for(32) == 20  # ratio, and the widest prompt allowed
+    assert cfg.prompt_width_for(96) == 20  # capped: a thick band stays a thin prompt
+    assert cfg.prompt_width_for(8) == 5  # below the cap the ratio decides
+    assert cfg.prompt_width_for(4) == 3  # never thinner than the minimum
+
+
+@pytest.mark.parametrize("band", [4, 8, 16, 32, 64, 96, 160])
+def test_prompt_width_stays_inside_its_bounds(band):
     cfg = Config.from_dict({})
-    assert cfg.prompt_width_for(band) == expected
-    assert 1 <= cfg.prompt_width_for(band) <= band
+    prompt = cfg.prompt_width_for(band)
+    assert 1 <= prompt <= band
+    assert prompt <= cfg.magic_prompt_max
+    assert prompt >= min(cfg.magic_prompt_min, band)
 
 
 def test_fingerprint_is_stable():

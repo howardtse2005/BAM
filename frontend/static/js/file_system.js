@@ -18,10 +18,6 @@ export class FileSystem {
     this.split = split;
   }
 
-  setSplit(split) {
-    this.split = split;
-  }
-
   async health() {
     return parse(await fetch("/api/health"));
   }
@@ -31,13 +27,15 @@ export class FileSystem {
   }
 
   async images() {
-    const data = await parse(
-      await fetch(
-        `/api/datasets/${encodeURIComponent(this.dataset)}/images?split=${encodeURIComponent(
-          this.split
-        )}&limit=1000`
-      )
+    const response = await fetch(
+      `/api/datasets/${encodeURIComponent(this.dataset)}/images?split=${encodeURIComponent(
+        this.split
+      )}&limit=1000`
     );
+    // A fresh install has no upload folder yet. That is an empty list, not an
+    // error worth a toast.
+    if (response.status === 404) return [];
+    const data = await parse(response);
     return data.images || [];
   }
 

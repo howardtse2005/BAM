@@ -488,15 +488,16 @@ def test_reference_single_crop(client, app):
     assert response.get_json()["prediction_base64"].startswith("data:image/png;base64,")
 
 
-def test_config_endpoint(client):
+def test_config_endpoint(client, app):
     data = client.get("/api/config").get_json()["config"]
+    cfg = app.config["BAM"]
     assert data["crop_size"] == 256
     assert data["crop_min"] == 64
     assert data["crop_ratio"] == 0.4
     assert data["crop_stride"] == 128
-    assert data["magic_brush_width"] == 32
-    assert data["params"]["brush_width"] == 32
-    assert data["params"]["prompt_width"] == 20
+    assert data["magic_brush_width"] == cfg.magic_brush_width
+    assert data["params"]["brush_width"] == cfg.magic_brush_width
+    assert data["params"]["prompt_width"] == cfg.prompt_width_for()
     assert data["splits"] == ["train", "val", "test"]
 
 

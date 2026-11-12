@@ -1,10 +1,9 @@
 /**
  * Canvas editor.
  *
- * Layer order (bottom to top): image, stroke trail, mask preview, proposal.
- * The mask data canvas is invisible; it is the source of truth and is what gets
- * saved. The preview canvas is a tinted, contoured view of it. The proposal
- * canvas holds a predicted edge line that has not been accepted yet.
+ * Layer order (bottom to top): image, stroke trail, mask preview. The mask data
+ * canvas is invisible; it is the source of truth and is what gets saved. The
+ * preview canvas is a tinted, contoured view of it.
  *
  * All pointer coordinates go through `screenToImage`, which uses the image
  * canvas's bounding rect. That automatically accounts for the wrapper's
@@ -17,7 +16,7 @@ import { CropCollector, sendFill, sendSegment } from "./magic_brush.js";
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
 /** Stage children that are controls, not canvas surface. */
-const STAGE_OVERLAYS = ".proposal-bar, .stage__progress, .stage__hint, .stage__empty";
+const STAGE_OVERLAYS = ".stage__progress, .stage__hint, .stage__empty";
 
 export class EditorCanvas {
   constructor(options) {
@@ -101,12 +100,6 @@ export class EditorCanvas {
     this.edgeCanvas = document.createElement("canvas");
     this.edgeCtx = this.edgeCanvas.getContext("2d");
     this.edgeReady = false;
-    this.proposalCanvas = document.createElement("canvas");
-    this.proposalCtx = this.proposalCanvas.getContext("2d", {
-      willReadFrequently: true,
-    });
-    this.proposalReady = false;
-    this.proposalMeta = null;
 
     this.previewQueued = false;
     this.strokeQueued = false;
@@ -131,7 +124,6 @@ export class EditorCanvas {
     this.fillColor = (styles.getPropertyValue("--mask-fill") || "#4f46e5").trim();
     this.rimColor = (styles.getPropertyValue("--mask-rim") || "#312a96").trim();
     this.strokeColor = (styles.getPropertyValue("--stroke") || "#f59e0b").trim();
-    this.accentColor = (styles.getPropertyValue("--accent") || "#4f46e5").trim();
   }
 
   refreshTheme() {
@@ -193,7 +185,6 @@ export class EditorCanvas {
       this.tint,
       this.rim,
       this.edgeCanvas,
-      this.proposalCanvas,
     ]) {
       canvas.width = this.width;
       canvas.height = this.height;
@@ -207,8 +198,6 @@ export class EditorCanvas {
     // preview tint and the saved PNG agree.
     this.maskCtx.clearRect(0, 0, this.width, this.height);
     this.edgeReady = false;
-    this.proposalReady = false;
-    this.proposalMeta = null;
     this.maskNonEmpty = false;
   }
 
@@ -286,11 +275,6 @@ export class EditorCanvas {
 
   // ------------------------------------------------------------------ tools
 
-  setSplit(split) {
-    this.split = split;
-    this.imageName = "";
-  }
-
   setTool(tool) {
     this.tool = tool;
     this.stage.classList.toggle("is-panning", tool === "pan");
@@ -353,9 +337,8 @@ export class EditorCanvas {
     if (event.button === 2) return;
     if (!this.width) return;
 
-    // The proposal bar and the progress pill are children of the stage, so
-    // their clicks would otherwise start a stroke underneath the button the
-    // user just pressed.
+    // The progress pill and hint are children of the stage, so their clicks
+    // would otherwise start a stroke underneath them.
     if (event.target instanceof Element && event.target.closest(STAGE_OVERLAYS)) {
       return;
     }
@@ -512,9 +495,8 @@ export class EditorCanvas {
   }
 
   _magicStart(x, y) {
-    // A new stroke replaces whatever line was pending. Nothing is committed
-    // until the user accepts, so there is no history entry yet.
-    this.clearProposal(false);
+    // A new stroke starts from a clean trail; the previous line is already in
+    // the mask, so it is left alone.
     this.strokeCtx.clearRect(0, 0, this.width, this.height);
     this.strokeDataCtx.clearRect(0, 0, this.width, this.height);
     this.bandCtx.clearRect(0, 0, this.width, this.height);
@@ -608,6 +590,9 @@ export class EditorCanvas {
   async _magicEnd() {
     const crops = this.collector.crops.slice();
     const cropSize = this.collector.cropSize;
+    // Read the modifier now: the response arrives after the pointer is gone and
+    // a new stroke may already have reset it.
+    const subtract = this.subtract;
     this.strokeCtx.clearRect(0, 0, this.width, this.height);
     this.bandCtx.clearRect(0, 0, this.width, this.height);
     this.magicLast = null;
@@ -634,18 +619,17 @@ export class EditorCanvas {
         },
       };
       const result = await sendSegment(payload);
-      const meta = {
+      const committed = await this.commitLine(result.line_base64, { subtract });
+      this.onSegmented?.({
+        ...result,
         closed: Boolean(result.closed),
-        confidence: result.confidence,
         cropSize: result.crop_size || cropSize,
         bandWidth: result.band_width || this.magicWidth,
         promptWidth: result.prompt_width || this.promptWidth,
         elapsed: performance.now() - started,
         crops: crops.length,
-        stats: result.stats,
-      };
-      await this.setProposal(result.line_base64, meta);
-      this.onProposal?.({ ...result, ...meta });
+        committed,
+      });
     } catch (error) {
       this.onError?.(error);
     } finally {
@@ -655,16 +639,20 @@ export class EditorCanvas {
     }
   }
 
-  // --------------------------------------------------------------- proposal
+  // ---------------------------------------------------------------- commit
 
   /**
-   * Show a predicted line without committing it.
+   * Paint the predicted line straight into the mask.
    *
-   * The server returns an opaque grayscale PNG, so it is re-read into the same
-   * white-with-alpha convention the mask canvas uses. Drawing it straight in
-   * would paint the black background over the mask.
+   * There is no review step: the server's line *is* the answer, so it lands in
+   * the mask as soon as it arrives. Undo is the escape hatch, which is cheaper
+   * than a modal decision after every stroke.
+   *
+   * The response is an opaque grayscale PNG, so it is re-read into the same
+   * white-with-alpha convention the mask uses; drawing it straight in would
+   * paint the black background over the mask.
    */
-  async setProposal(lineBase64, meta = {}) {
+  async commitLine(lineBase64, { subtract = false } = {}) {
     if (!lineBase64 || !this.width) return false;
     const image = await loadImage(lineBase64);
 
@@ -675,42 +663,26 @@ export class EditorCanvas {
     tempCtx.drawImage(image, 0, 0, this.width, this.height);
     const source = tempCtx.getImageData(0, 0, this.width, this.height);
     const data = source.data;
+    let seen = false;
     for (let i = 0; i < data.length; i += 4) {
       const on = data[i] > 127;
       data[i] = 255;
       data[i + 1] = 255;
       data[i + 2] = 255;
       data[i + 3] = on ? 255 : 0;
+      if (on) seen = true;
     }
-    this.proposalCtx.putImageData(source, 0, 0);
+    // Nothing predicted: do not spend a history entry or a repaint on it.
+    if (!seen) return false;
+    tempCtx.putImageData(source, 0, 0);
 
-    this.proposalReady = true;
-    this.proposalMeta = meta;
-    this.updatePreview();
-    this._status();
-    return true;
-  }
-
-  clearProposal(notify = true) {
-    this.proposalReady = false;
-    this.proposalMeta = null;
-    if (this.width) this.proposalCtx.clearRect(0, 0, this.width, this.height);
-    this.updatePreview();
-    this._status();
-    if (notify) this.onProposalCleared?.();
-  }
-
-  /** Commit the pending line to the mask. Returns false when there is none. */
-  acceptProposal() {
-    if (!this.proposalReady) return false;
     this.pushHistory();
     const ctx = this.maskCtx;
     ctx.save();
-    ctx.globalCompositeOperation = this.subtract ? "destination-out" : "source-over";
-    ctx.drawImage(this.proposalCanvas, 0, 0);
+    ctx.globalCompositeOperation = subtract ? "destination-out" : "source-over";
+    ctx.drawImage(temp, 0, 0);
     ctx.restore();
-    if (!this.subtract) this.maskNonEmpty = true;
-    this.clearProposal();
+    if (!subtract) this.maskNonEmpty = true;
     this.updatePreview();
     this._status();
     return true;
@@ -783,7 +755,6 @@ export class EditorCanvas {
     this.maskCtx.clearRect(0, 0, this.width, this.height);
     this.maskNonEmpty = false;
     this.edgeReady = false;
-    this.clearProposal(false);
     this.updatePreview();
     this._status();
   }
@@ -816,9 +787,8 @@ export class EditorCanvas {
   async fillMask() {
     if (!this.width) return false;
 
-    if (this.proposalReady) this.acceptProposal();
     if (!this.maskNonEmpty) {
-      this.onError?.(new Error("Draw or accept a line first"));
+      this.onError?.(new Error("Draw a line first"));
       return false;
     }
 
@@ -973,16 +943,6 @@ export class EditorCanvas {
       ctx.drawImage(fill, 0, 0);
       ctx.restore();
     }
-
-    // The pending line sits on top of everything: it is the thing the user is
-    // being asked to judge, so it must not be hidden by the mask tint.
-    if (this.proposalReady) {
-      const line = this._drawTint(this.proposalCanvas, this.accentColor);
-      ctx.save();
-      ctx.globalAlpha = 0.95;
-      ctx.drawImage(line, 0, 0);
-      ctx.restore();
-    }
   }
 
   _queuePreview() {
@@ -1061,7 +1021,6 @@ export class EditorCanvas {
       brushWidth: this.magicWidth,
       promptWidth: this.promptWidth,
       hasMask: this.maskNonEmpty,
-      proposal: this.proposalReady,
       tool: this.tool,
     });
   }

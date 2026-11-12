@@ -37,7 +37,7 @@ function boot0() {
     promptMax: boot.magicPromptMax,
   });
   const settings = new Settings(canvas);
-  const ui = new UI({ canvas, fs, settings, bootstrap: boot });
+  const ui = new UI({ canvas, fs, settings });
   ui.settings = settings;
 
   bindShortcuts({ canvas, ui });
@@ -59,20 +59,10 @@ function boot0() {
 
     if (boot.image) {
       await ui.loadImage(boot.image);
-    } else {
-      // Opening a dataset without naming an image should land on the first one,
-      // not on an empty canvas plus a modal.
-      try {
-        const images = await fs.images();
-        if (images.length) {
-          await ui.loadImage(images[0]);
-        } else {
-          await ui.openPicker();
-        }
-      } catch {
-        await ui.openPicker();
-      }
     }
+    // No image named in the URL: the editor stays empty and the stage asks for
+    // an upload. Auto-opening the first file in the folder would hand the user
+    // somebody else's image — the point of the site is their own.
 
     requestAnimationFrame(() => canvas.fit());
   })();

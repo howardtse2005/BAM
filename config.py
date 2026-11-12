@@ -56,6 +56,7 @@ class Config:
     # ------------------------------------------------------------------ paths
     datasets_dir: str = "./datasets"          # folder holding every dataset
     dataset: str = "demo"                     # which dataset to train on
+    upload_dataset: str = "uploads"           # where the website stores uploaded images
     model_path: str = "./model/bam_v1.pth"
     onnx_path: str = "./model/bam_v1.onnx"
     onnx_int8_path: str = "./model/bam_v1_int8.onnx"
@@ -282,6 +283,8 @@ class Config:
     def validate(self) -> None:
         if not self.dataset:
             raise ValueError("dataset must name a folder under datasets_dir")
+        if not self.upload_dataset:
+            raise ValueError("upload_dataset must name a folder under datasets_dir")
         if self.tier not in ("A", "B"):
             raise ValueError("tier must be 'A' or 'B'")
 

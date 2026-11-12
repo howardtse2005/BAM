@@ -11,22 +11,18 @@ function formatMs(value) {
 }
 
 export class UI {
-  constructor({ canvas, fs, settings, bootstrap }) {
+  constructor({ canvas, fs, settings }) {
     this.canvas = canvas;
     this.fs = fs;
     this.settings = settings;
-    this.bootstrap = bootstrap;
     this.images = [];
     this.modal = el("modal");
     this.list = el("image-list");
     this.search = el("modal-search");
-    this.splitSelect = el("split-select");
 
     this.bindToolbar();
     this.bindTopbar();
     this.bindModal();
-    this.bindSplit();
-    this.bindProposal();
 
     initTheme(el("theme-toggle"), () => this.canvas.refreshTheme());
 
@@ -39,8 +35,7 @@ export class UI {
     this.settings.applyToCanvas();
     this.canvas.onStatus = (status) => this.updateStatus(status);
     this.canvas.onProgress = (on, text) => this.setProgress(on, text);
-    this.canvas.onProposal = (result) => this.onProposal(result);
-    this.canvas.onProposalCleared = () => this.hideProposalBar();
+    this.canvas.onSegmented = (result) => this.onSegmented(result);
     this.canvas.onFilled = (result) => this.onFilled(result);
     this.canvas.onError = (error) => this.onError(error);
     this.canvas.getParams = () => this.settings.params();
@@ -61,9 +56,9 @@ export class UI {
 
   bindTopbar() {
     el("btn-open")?.addEventListener("click", () => this.openPicker());
-    el("btn-open-2")?.addEventListener("click", () => this.openPicker());
-    el("btn-save")?.addEventListener("click", () => this.save());
     el("btn-upload")?.addEventListener("click", () => el("file-input")?.click());
+    el("btn-upload-2")?.addEventListener("click", () => el("file-input")?.click());
+    el("btn-save")?.addEventListener("click", () => this.save());
     el("file-input")?.addEventListener("change", (event) => {
       const file = event.target.files?.[0];
       if (file) this.upload(file);
@@ -85,41 +80,6 @@ export class UI {
     });
   }
 
-  bindProposal() {
-    el("btn-accept-line")?.addEventListener("click", () => this.acceptProposal());
-    el("btn-fill-line")?.addEventListener("click", () => this.fillProposal());
-    el("btn-discard-line")?.addEventListener("click", () => this.discardProposal());
-  }
-
-  bindSplit() {
-    if (!this.splitSelect) return;
-    this.splitSelect.value = this.bootstrap.split || "train";
-    this.splitSelect.addEventListener("change", () => this.setSplit(this.splitSelect.value));
-  }
-
-  async setSplit(split) {
-    this.fs.setSplit(split);
-    this.canvas.setSplit(split);
-    if (this.splitSelect) this.splitSelect.value = split;
-
-    const url = new URL(window.location.href);
-    url.searchParams.set("split", split);
-    window.history.replaceState({}, "", url);
-
-    try {
-      const images = await this.fs.images();
-      if (images.length) {
-        await this.loadImage(images[0]);
-      } else {
-        this.canvas.clearMask(false);
-        el("image-name").textContent = "no images";
-        this.hint(`No images in the ${split} split`);
-      }
-    } catch (error) {
-      this.onError(error);
-    }
-  }
-
   setTool(tool) {
     this.canvas.setTool(tool);
     document.querySelectorAll("[data-tool]").forEach((button) => {
@@ -129,7 +89,7 @@ export class UI {
       magicBrush:
         "Drag along the object edge. The solid core is what the model sees; the wide band is how far the predicted line may move.",
       pan: "Drag to pan. Wheel to zoom.",
-      fill: "Fill the region enclosed by the accepted line.",
+      fill: "Fill the region enclosed by the line you drew.",
     };
     this.hint(hints[tool] || null);
   }
@@ -177,7 +137,7 @@ export class UI {
       const empty = document.createElement("li");
       empty.className = "muted";
       empty.style.padding = "8px 10px";
-      empty.textContent = "no images";
+      empty.textContent = "no images yet — upload one";
       this.list.appendChild(empty);
       return;
     }
@@ -203,16 +163,13 @@ export class UI {
       // Opening an image starts from an empty mask. A stored mask is never
       // fetched here: the dataset's gt is the answer to the question the editor
       // asks, so loading it would segment the object before the user drew
-      // anything. The flow is stroke -> clean line -> accept -> fill.
+      // anything. The flow is stroke -> clean line -> fill.
       await this.canvas.load(name);
       el("image-name").textContent = name;
       document.title = `${name} — BAM`;
       el("stage-empty").hidden = true;
-      this.hideProposalBar();
       this.updateImageInfo();
-      this.hint(
-        "Magic brush: drag roughly along the object edge, accept the clean line, then fill."
-      );
+      this.hint("Magic brush: drag along the object edge, then press F to fill it.");
     } catch (error) {
       toast(`Could not open ${name}: ${errorMessage(error)}`, "error");
     }
@@ -258,61 +215,6 @@ export class UI {
     }
   }
 
-  // -------------------------------------------------------------- proposal
-
-  showProposalBar(meta) {
-    const bar = el("proposal-bar");
-    if (!bar) return;
-    bar.hidden = false;
-
-    const label = el("proposal-label");
-    if (label) {
-      const closed = meta.closed ? "closed loop" : "open line";
-      const crops = meta.crops ? `${meta.crops} crop${meta.crops === 1 ? "" : "s"}` : "";
-      const size = meta.cropSize ? `${meta.cropSize}px` : "";
-      label.textContent = ["Predicted edge", closed, crops, size]
-        .filter(Boolean)
-        .join(" · ");
-    }
-
-    // Filling an open line has no interior to fill, so the action is disabled
-    // rather than offered and then refused.
-    const fillButton = el("btn-fill-line");
-    if (fillButton) {
-      fillButton.disabled = !meta.closed;
-      fillButton.title = meta.closed
-        ? "Fill the region enclosed by this line"
-        : "The line does not enclose a region yet";
-    }
-  }
-
-  hideProposalBar() {
-    const bar = el("proposal-bar");
-    if (bar) bar.hidden = true;
-  }
-
-  acceptProposal() {
-    if (!this.canvas.acceptProposal()) return false;
-    this.hideProposalBar();
-    this.updateImageInfo();
-    this.hint("Line accepted. Press F to fill the enclosed region.");
-    return true;
-  }
-
-  discardProposal() {
-    this.canvas.clearProposal();
-    this.hideProposalBar();
-    this.hint("Line discarded. Drag again to re-stroke.");
-  }
-
-  async fillProposal() {
-    if (!this.canvas.proposalReady) return;
-    this.canvas.acceptProposal();
-    this.hideProposalBar();
-    await this.canvas.fillMask();
-    this.updateImageInfo();
-  }
-
   // ----------------------------------------------------------------- status
 
   updateStatus(status) {
@@ -340,9 +242,6 @@ export class UI {
     if (el("i-mask")) {
       el("i-mask").textContent = status.hasMask ? "edited" : "empty";
     }
-    if (el("i-line")) {
-      el("i-line").textContent = status.proposal ? "pending" : "none";
-    }
   }
 
   updateImageInfo() {
@@ -364,7 +263,12 @@ export class UI {
     if (text && el("progress-text")) el("progress-text").textContent = text;
   }
 
-  onProposal(result) {
+  /**
+   * The line is already in the mask by the time this runs — there is no review
+   * step. What is left to do is report what happened and, when the model had to
+   * be cut back, say so instead of leaving a short line unexplained.
+   */
+  onSegmented(result) {
     const stats = result.stats || {};
     if (el("m-latency")) el("m-latency").textContent = formatMs(stats.ms_total);
     if (el("s-latency")) {
@@ -375,20 +279,22 @@ export class UI {
     if (el("i-crops")) el("i-crops").textContent = String(stats.num_crops || 0);
     this.canvas.setEdge(result.edge_base64);
 
-    this.showProposalBar(result);
-    if (!result.closed) {
-      this.hint("The line is open. Accept it as-is, re-stroke, or close the gap to fill.");
+    if (!result.committed) {
+      this.hint("No edge found under your stroke — draw a wider band or follow the edge more closely.");
+      this.updateImageInfo();
+      return;
     }
 
     // The prediction is clipped to the band, so a large trim means the stroke
-    // was drawn too far from the edge or too narrow for the model's guess. That
-    // is worth saying: the trimmed line looks like a model failure otherwise.
+    // was drawn too far from the edge or too narrow for the model's guess.
     const predicted = Number(stats.predicted_px || 0);
     const clipped = Number(stats.clipped_px || 0);
     if (predicted > 0 && clipped / predicted > 0.3) {
       this.hint(
         "The edge ran outside your stroke and was trimmed — widen the brush or follow the edge more closely."
       );
+    } else if (!result.closed) {
+      this.hint("The line is open — press F to fill it, or close the gap and stroke again.");
     }
     this.updateImageInfo();
   }

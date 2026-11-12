@@ -19,21 +19,6 @@ export function bindShortcuts({ canvas, ui }) {
     const meta = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();
 
-    if (event.key === "Escape") {
-      if (canvas.proposalReady) {
-        event.preventDefault();
-        ui.discardProposal();
-      }
-      return;
-    }
-    if (event.key === "Enter") {
-      if (canvas.proposalReady) {
-        event.preventDefault();
-        ui.acceptProposal();
-      }
-      return;
-    }
-
     if (meta && key === "z") {
       event.preventDefault();
       if (event.shiftKey) canvas.redo();
@@ -103,7 +88,7 @@ export function bindShortcuts({ canvas, ui }) {
         break;
       case "?":
         ui.hint(
-          "B brush · E eraser · M magic brush · F fill · Space pan · [ ] size · Enter accept · Esc discard · Ctrl+Z undo · Tab mask"
+          "B brush · E eraser · M magic brush · F fill · Space pan · [ ] size · Ctrl+Z undo · Tab mask"
         );
         break;
       default:
