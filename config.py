@@ -1,12 +1,12 @@
-"""BAM configuration.
+"""BAM configuration — the single source of truth.
 
-One flat dataclass, one setting per line, so the whole configuration fits on a
-screen and can be edited without hunting through nested sections.
+Every setting and its default live in the dataclass below, one per line, next to
+the comment that explains it. There is no second file to keep in sync.
 
-    Config.load()                       # defaults + config.yaml + environment
+    Config.load()                       # defaults + environment
     Config.load(overrides=["epochs=5"]) # plus CLI-style overrides
 
-Resolution order: CLI override > environment > config.yaml > defaults.
+Resolution order: CLI override > environment > defaults.
 
 Environment variables are the field name in upper case with a ``BAM_`` prefix:
 
@@ -15,6 +15,9 @@ Environment variables are the field name in upper case with a ``BAM_`` prefix:
 CLI overrides use the field name directly:
 
     python run.py --set port=8001
+
+``Config.to_yaml`` still exists, but only as an *output*: training writes the
+resolved values into ``runs/<id>/config.yaml`` as a record of what ran.
 
 Dataset layout expected on disk (see README step 2):
 
@@ -39,7 +42,6 @@ except Exception:  # pragma: no cover - keep the import error readable
 
 
 ENV_PREFIX = "BAM_"
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
 # Normalisation constants shared by training and inference. Not configurable on
 # purpose: a mismatch here silently degrades every prediction.
@@ -72,12 +74,12 @@ class Config:
     # -------------------------------------------------------- brush synthesis
     brush_radius_min: float = 1.5             # brush radius range, canonical px
     brush_radius_max: float = 6.0
-    brush_jitter: float = 2.0                 # global offset sigma
-    brush_wobble_amp: tuple = (0.5, 2.0)      # wobble amplitude range
-    brush_wobble_len: tuple = (60.0, 260.0)   # wobble wavelength range
+    brush_jitter: float = 3.0                 # global offset sigma
+    brush_wobble_amp: tuple = (1.0, 4.0)      # wobble amplitude range
+    brush_wobble_len: tuple = (20.0, 180.0)   # wobble wavelength range
     brush_coverage: tuple = (1.00, 1.00)      # fraction of each contour covered
-    brush_simplify: tuple = (6.0, 16.0)       # RDP epsilon range
-    brush_smooth: tuple = (15, 31)            # smoothing window range
+    brush_simplify: tuple = (2.0, 10.0)       # RDP epsilon range
+    brush_smooth: tuple = (5, 21)             # smoothing window range
     brush_max_offset: float = 12.0            # displacement clip, px
     brush_encoding: str = "binary"            # binary | sdf
     # Off by default: these make the brush cover less than the edge, which would
@@ -209,6 +211,7 @@ class Config:
         return asdict(self)
 
     def to_yaml(self, path: str | Path | None = None) -> str:
+        """Serialise the resolved config, for the run record only."""
         if yaml is None:
             raise RuntimeError("PyYAML is required to serialise the config")
         text = yaml.safe_dump(self.to_dict(), sort_keys=False, allow_unicode=True)
@@ -225,20 +228,11 @@ class Config:
     @classmethod
     def load(
         cls,
-        path: str | Path | None = None,
         overrides: list[str] | None = None,
         use_env: bool = True,
     ) -> "Config":
+        """Defaults, then ``BAM_*`` environment, then ``key=value`` overrides."""
         data: dict[str, Any] = {}
-
-        cfg_path = Path(path) if path else DEFAULT_CONFIG_PATH
-        if cfg_path.is_file():
-            if yaml is None:
-                raise RuntimeError("PyYAML is required to read config.yaml")
-            loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-            if not isinstance(loaded, dict):
-                raise ValueError(f"{cfg_path} must contain a mapping at the top level")
-            data.update(loaded)
 
         if use_env:
             data.update(_env_overrides())
@@ -376,8 +370,7 @@ def _parse_override(item: str) -> tuple[str, Any]:
 
 
 def add_config_args(parser) -> None:
-    """Attach the standard config flags to an argparse parser."""
-    parser.add_argument("--config", default=None, help="path to config.yaml")
+    """Attach the standard config flag to an argparse parser."""
     parser.add_argument(
         "--set",
         dest="overrides",

@@ -1,6 +1,6 @@
 """Training entry point.
 
-    python -m training.train                      # defaults from config.yaml
+    python -m training.train                      # defaults from config.py
     python -m training.train --set epochs=10 --set batch_size=16
     python -m training.train --dry-run            # synthetic batch, no data needed
 
@@ -207,7 +207,7 @@ def dry_run(cfg: Config, device: torch.device) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    cfg = Config.load(args.config, args.overrides)
+    cfg = Config.load(args.overrides)
     if args.epochs is not None:
         cfg.epochs = int(args.epochs)
     if args.batch_size is not None:

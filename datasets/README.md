@@ -77,8 +77,8 @@ python -m training.prepare.preprocess --dataset datasets/mything
 # 3. verify
 python tools/verify_alignment.py --dataset datasets/mything_prepared
 
-# 4. point config.yaml at it
-#    dataset: mything_prepared
+# 4. train on it (no file to edit)
+#    python -m training.train --set dataset=mything_prepared
 ```
 
 Preprocessing is non-destructive by default. `--inplace` rewrites the source

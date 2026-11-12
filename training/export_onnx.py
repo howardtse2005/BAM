@@ -95,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--size", type=int, default=256)
     args = parser.parse_args(argv)
 
-    cfg = Config.load(args.config, args.overrides)
+    cfg = Config.load(args.overrides)
     ckpt_path = Path(args.checkpoint) if args.checkpoint else cfg.model_file
     if not ckpt_path.is_file():
         raise SystemExit(f"checkpoint not found: {ckpt_path}")

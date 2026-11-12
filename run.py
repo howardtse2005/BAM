@@ -32,7 +32,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    cfg = Config.load(args.config, args.overrides)
+    cfg = Config.load(args.overrides)
     if args.host:
         cfg.host = args.host
     if args.port:

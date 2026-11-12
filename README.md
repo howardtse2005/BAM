@@ -229,14 +229,23 @@ green = clean edge, orange = brush, blue = mask contour.
 
 ## Step 3 — Train and validate
 
-Set the dataset in `config.yaml`:
+`config.py` is the only config file: defaults, types and validation all live
+there. Set the dataset by editing it:
 
-```yaml
-dataset: DIS5K_prepared
-width: 20            # 16 = faster, 32 = more accurate
-batch_size: 32
-epochs: 60
+```python
+dataset: str = "DIS5K_prepared"
+width: int = 20        # 16 = faster, 32 = more accurate
+batch_size: int = 32
+epochs: int = 60
 ```
+
+or override for a single run without touching the file:
+
+```bash
+python -m training.train --set dataset=DIS5K_prepared --set epochs=10
+```
+
+Then:
 
 ```bash
 python -m training.train --dry-run     # one synthetic batch, no data needed
@@ -258,7 +267,7 @@ because the product needs the line in the right place, not merely a plausible
 mask.
 
 Validation crops are always boundary-centred. Training crops use the four-way
-mixture in `config.yaml` (`mix_boundary`, `mix_near`, `mix_empty`, `mix_dense`);
+mixture in `config.py` (`mix_boundary`, `mix_near`, `mix_empty`, `mix_dense`);
 an empty crop teaches the model to stay silent, but it would give free 1.0 scores
 in validation.
 
@@ -416,7 +425,7 @@ BAM_BATCH_SIZE=16 python run.py
 python run.py --set port=8001 --set width=24
 ```
 
-Resolution order: CLI > environment > `config.yaml` > defaults.
+Resolution order: CLI > environment > defaults in `config.py`.
 
 ---
 
@@ -479,8 +488,7 @@ BAM/
 │   └── train.py, evaluate.py, export_onnx.py
 ├── tools/               # make_demo_subset, verify_alignment, visualize_crops, benchmark_cpu
 ├── tests/               # 130 tests
-├── config.py            # flat dataclass config
-├── config.yaml
+├── config.py            # the only config: flat dataclass + defaults
 ├── imgio.py             # unicode-safe image IO
 └── run.py
 ```

@@ -209,10 +209,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", default=None, help="dataset path (default: config)")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--out", default="datasets/_qa/alignment")
-    parser.add_argument("--config", default=None)
     args = parser.parse_args(argv)
 
-    cfg = Config.load(args.config)
+    cfg = Config.load()
     root = Path(args.dataset) if args.dataset else cfg.dataset_path
     if not root.is_dir():
         raise SystemExit(f"dataset folder not found: {root}")

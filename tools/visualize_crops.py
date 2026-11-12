@@ -50,14 +50,13 @@ def denormalise(image: np.ndarray, mean, std) -> np.ndarray:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Visualise dataset crops")
-    parser.add_argument("--config", default=None)
     parser.add_argument("--split", default="train", choices=["train", "val", "test"])
     parser.add_argument("--count", type=int, default=8)
     parser.add_argument("--index", type=int, default=None, help="single sample index")
     parser.add_argument("--out", default="datasets/_qa/crops")
     args = parser.parse_args(argv)
 
-    cfg = Config.load(args.config)
+    cfg = Config.load()
     cfg.validate()
     dataset = build_dataset(cfg, args.split, train=True, length=max(args.count, 1))
 

@@ -223,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
-    cfg = Config.load(args.config, args.overrides)
+    cfg = Config.load(args.overrides)
     source = Path(args.dataset) if args.dataset else cfg.dataset_path
     if not source.is_dir():
         raise SystemExit(f"dataset folder not found: {source}")
@@ -277,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
     rejected = sum(r.get("rejected", 0) for r in reports)
     print(f"done: {total} samples processed, {rejected} rejected")
     if total and not args.dry_run:
-        print(f"next: set 'dataset: {dest.name}' in config.yaml, then python -m training.train")
+        print(f"next: python -m training.train --set dataset={dest.name}")
     return 0 if total else 1
 
 

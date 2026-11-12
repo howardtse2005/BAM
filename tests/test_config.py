@@ -1,6 +1,15 @@
+from pathlib import Path
+
 import pytest
 
 from config import Config
+
+
+def test_config_py_is_the_only_config_file():
+    root = Path(__file__).resolve().parent.parent
+    assert not (root / "config.yaml").exists(), (
+        "config.yaml was merged into config.py; a second file drifts silently"
+    )
 
 
 def test_defaults_load_and_validate():
@@ -11,7 +20,7 @@ def test_defaults_load_and_validate():
     assert cfg.infer_device in ("cpu", "cuda")
 
 
-def test_env_override_wins_over_yaml(monkeypatch):
+def test_env_override_wins_over_defaults(monkeypatch):
     monkeypatch.setenv("BAM_INFER_DEVICE", "cuda")
     monkeypatch.setenv("BAM_CROP_SIZE", "320")
     cfg = Config.load(use_env=True)

@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default=None)
     args = parser.parse_args(argv)
 
-    cfg = Config.load(args.config, args.overrides)
+    cfg = Config.load(args.overrides)
     cfg.validate()
     device = resolve_device(cfg.infer_device)
     ckpt_path = Path(args.checkpoint) if args.checkpoint else cfg.model_file

@@ -22,10 +22,10 @@ ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "frontend"
 
 
-def create_app(config=None, config_path=None, overrides=None) -> Flask:
+def create_app(config=None, overrides=None) -> Flask:
     from config import Config
 
-    cfg = config or Config.load(config_path, overrides)
+    cfg = config or Config.load(overrides)
     cfg.validate()
 
     app = Flask(
