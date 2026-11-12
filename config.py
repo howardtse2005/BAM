@@ -107,9 +107,9 @@ class Config:
     seed: int = 1337
     train_device: str = "auto"                # auto | cpu | cuda
     batch_size: int = 32
-    crops_per_epoch: int = 24000
+    crops_per_epoch: int = 72000
     val_crops: int = 2000
-    epochs: int = 60
+    epochs: int = 100
     lr: float = 3e-4
     weight_decay: float = 1e-4
     warmup_epochs: int = 3
