@@ -10,10 +10,19 @@ brush → square around the stroke → UNet → clean line → fill → mask
 ## Demo
 
 Demo 1:
-<video src="https://github.com/howardtse2005/BAM/raw/refs/heads/main/demo/BAM_demo_1.mp4" controls width="100%"></video>
+
+
+https://github.com/user-attachments/assets/f8015672-6c44-4dc7-9f34-9b5ff878368e
+
+
 
 Demo 2:
-<video src="https://github.com/howardtse2005/BAM/raw/refs/heads/main/demo/BAM_demo_2.mp4" controls width="100%"></video>
+
+
+
+https://github.com/user-attachments/assets/95c235ee-d39b-4e27-ad70-e277e353d84d
+
+
 ## How to run
 
 ### 1. Create virtual environment
