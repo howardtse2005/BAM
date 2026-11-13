@@ -232,10 +232,5 @@ Gool. *Highly Accurate Dichotomous Image Segmentation.* ECCV 2022.
 - The DIS5K code and evaluation metric are Apache-2.0. That covers the code, not
   the data.
 
-**What that means here.** DIS5K is the only dataset used, so weights trained on
-it are research-only: set `tier: B` in `config.py` before training. The loader
-refuses a tier-B checkpoint unless the config says `tier: B`, which is what stops
-a research model from being shipped by accident.
-
-**BAM itself** has no separate licence file yet; until one is added, treat the
+**BAM itself** has no separate licence file yet. Until one is added, treat the
 code as all rights reserved.
