@@ -29,16 +29,24 @@ https://github.com/user-attachments/assets/95c235ee-d39b-4e27-ad70-e277e353d84d
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate            # Windows
-# source .venv/bin/activate       # macOS / Linux
-
+```
+For windows:
+```bash
+.venv\Scripts\activate
+```
+For macOS / Linux:
+```bash
+source .venv/bin/activate
+```
+Then, install requirements
+```bash
 pip install -r requirements.txt
 pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU-only machine
 ```
 
 ### 2. Download datasets
 
-**DIS5K** is the dataset this model is trained on — 5,470 images with
+**DIS5K** is the dataset this demo is trained on — 5,470 images with
 high-quality masks, in three predefined splits.
 
 - Repo and instructions: <https://github.com/xuebinqin/DIS>
