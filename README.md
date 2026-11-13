@@ -91,7 +91,7 @@ datasets/DIS5K_prepared/
 `gt_edge` and `gt_brush` are never authored by hand — both are derived from `gt/`,
 and both cover the same boundary, outer contour and holes included.
 
-### 3. Preprocess the dataset and train the model (optional; pretrained model is available on model/bam_v1.pth
+### 3. Preprocess the dataset and train the model (optional; pretrained model is available on `model/bam_v1.pth`
 
 Preprocess the dataset.
 ```bash
