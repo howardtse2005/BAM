@@ -91,20 +91,14 @@ datasets/DIS5K_prepared/
 `gt_edge` and `gt_brush` are never authored by hand — both are derived from `gt/`,
 and both cover the same boundary, outer contour and holes included.
 
-### 3. Preprocess the dataset
+### 3. Preprocess the dataset and train the model (optional; pretrained model is available on model/bam_v1.pth
 
+Preprocess the dataset.
 ```bash
 python -m training.prepare.preprocess --dataset datasets/DIS5K
 ```
 
-Optional sanity check: `edge-covered-by-brush` should be ≈ 1.0 and
-`brush-on-edge` below 0.6:
-
-```bash
-python tools/verify_alignment.py --dataset datasets/DIS5K_prepared
-```
-
-### 4. Train the model
+Train the model.
 
 ```bash
 python -m training.train --set dataset=DIS5K_prepared
@@ -117,7 +111,7 @@ python -m training.train --dry-run                    # one synthetic batch, no 
 python -m training.train --resume runs/<id>/last.pth
 ```
 
-### 5. Test the model (optional)
+### 4. Test the model (optional)
 
 ```bash
 python -m training.evaluate --split test
@@ -130,7 +124,7 @@ CPU inference, export ONNX:
 python -m training.export_onnx --checkpoint model/bam_v1.pth --int8
 ```
 
-### 6. Deploy the local website
+### 5. Deploy the local website
 
 ```bash
 python run.py                                     # http://127.0.0.1:8000
