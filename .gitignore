@@ -20,11 +20,6 @@ datasets/**/gt_brush/
 datasets/manifest.json
 !datasets/README.md
 
-# Model weights are large binaries; publish them as release assets.
-model/*.pth
-model/*.pt
-model/*.onnx
-
 # Training artifacts
 runs/
 reports/
