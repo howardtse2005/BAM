@@ -97,12 +97,7 @@ and both cover the same boundary, outer contour and holes included.
 python -m training.prepare.preprocess --dataset datasets/DIS5K
 ```
 
-Downscales so the short side is 640 (never upscaling), validates masks, and
-writes `gt_edge/` and `gt_brush/` for every split. The source folder is left
-untouched. Then point the config at the output, either by editing `dataset` in
-`config.py` or by passing `--set dataset=DIS5K_prepared` to every command.
-
-Optional sanity check — `edge-covered-by-brush` should be ≈ 1.0 and
+Optional sanity check: `edge-covered-by-brush` should be ≈ 1.0 and
 `brush-on-edge` below 0.6:
 
 ```bash
@@ -114,11 +109,8 @@ python tools/verify_alignment.py --dataset datasets/DIS5K_prepared
 ```bash
 python -m training.train --set dataset=DIS5K_prepared
 ```
-
-AdamW with a cosine schedule and 3 warmup epochs, batch 32, 256² crops, up to 100
-epochs, early stopping on validation boundary-F@2px. EMA weights are always used;
-mixed precision kicks in on CUDA. The best checkpoint is copied to
-`model/bam_v1.pth`; logs and the resolved config land in `runs/<timestamp>/`.
+The best checkpoint is copied to
+`model/bam_v1.pth`. Logs and the resolved config land in `runs/<timestamp>/`.
 
 ```bash
 python -m training.train --dry-run                    # one synthetic batch, no dataset needed
@@ -132,7 +124,7 @@ python -m training.evaluate --split test
 ```
 
 Prints IoU, boundary IoU, BF and MAE, and writes `runs/eval_test.json`. For faster
-CPU inference, export ONNX — the backend then prefers it:
+CPU inference, export ONNX:
 
 ```bash
 python -m training.export_onnx --checkpoint model/bam_v1.pth --int8
@@ -150,13 +142,7 @@ predicts a band around your stroke, and the inspector shows an amber warning.
 
 ## Configuration explanation
 
-`config.py` is the only config — one flat dataclass, one setting per line.
-Resolution order: CLI `--set key=value` > environment `BAM_<FIELD>` > defaults.
-
-```bash
-BAM_BATCH_SIZE=16 python run.py
-python run.py --set port=8001 --set width=24
-```
+`config.py` is the only config
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -181,7 +167,7 @@ python run.py --set port=8001 --set width=24
 The two brush widths are the point of the magic brush: you draw one 32 px stroke
 and see only that, while the model is given a 12 px prompt inside it. The
 difference is the tolerance the predicted line may move in, so a line a few
-pixels off the centreline is still visibly *your* stroke.
+pixels off the centreline is still visibly your stroke.
 
 ## Website tools explanation
 
