@@ -3,10 +3,6 @@
 ### Note
 This is the early version 1.1 and still in progress. There might be rough edges or wrong predictions as the UNet-based BAM was only trained on DIS5K dataset which might be not enough for any random objects. BAM is lightweight and runs on CPU (although GPU is recommended for training).
 
-```
-brush → square around the stroke → UNet → clean line → fill → mask
-```
-
 ## Demo
 
 Demo 1:
