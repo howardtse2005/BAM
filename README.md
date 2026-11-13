@@ -49,7 +49,7 @@ high-quality masks, in three predefined splits.
 - Download: [Google Drive](https://drive.google.com/file/d/1O1eIuXX1hlGsV7qx4eSkjH231q7G1by1/view?usp=sharing)
   or [Baidu Pan](https://pan.baidu.com/s/1y6CQJYledfYyEO0C_Gejpw?pwd=rtgw) (code `rtgw`)
 
-**Don't want to download?** *Skipping to step 5 is recommended.* If want to train your model yourself, a 24-image synthetic set is enough to exercise every
+**Don't want to download?** ***Skipping to step 5 is recommended.*** If want to train your model yourself, a 24-image synthetic set is enough to exercise every
 step below, and a prepared copy already sits in `datasets/demo` — skip to step 4
 with `--set dataset=demo`. To rebuild it:
 
