@@ -1,5 +1,7 @@
 # BAM: Brush Anything Model (v1.0)
 
+BAM is a lightweight UNet-based edge detector model that takes 4 channels input: RGB + User stroke. Users simply roughly brush the edges of the objects they want to highlight. Then, BAM predicts a clean edge line of the objects based on the rough stroke input. Finally, users can segment the whole area enclosed by the lines.
+
 ### Note
 This is the early version 1.0 and still in progress. There might be rough edges or wrong predictions as the UNet-based BAM was only trained on DIS5K dataset which might be not enough for any random objects. BAM is lightweight and runs on CPU (although GPU is recommended for training).
 
